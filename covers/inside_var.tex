@@ -19,9 +19,12 @@
 % 預設是LARGE, 可以換成其他比較小的語法
 % 大小依序為: LARGE > Large > large > normalsize
     \begin{minipage}[t][3cm][t]{\textwidth}
-        \centering \LARGE \chineseTitle \\
-        \centering \LARGE \englishTitle \\
+        \centering \Large \chineseTitle \\
+        \centering \Large \englishTitle \\
     \end{minipage}
+
+    % 若標題過長與下方資訊重疊，可調整此處把研究生/指導教授區塊整體下移
+    \vspace{2cm}
   
     \fontsize{14}{14}\selectfont{
     \begin{tabular}{r l c r l}

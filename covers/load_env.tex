@@ -5,7 +5,7 @@
 
 \usepackage{xeCJK}       %讓中英文字體分開設置 
 \usepackage[UTF8,fontset=none,scheme=plain]{ctex}
-\setCJKmainfont[AutoFakeBold={4}, AutoFakeSlant=0.2]{TW-Kai}
+\setCJKmainfont[AutoFakeBold={4}, AutoFakeSlant=0.2]{TW-Kai}  % 全字庫正楷體(標楷體替代), apt: fonts-cns11643-kai
 %\setmainfont{Times New Roman}
 
 \usepackage[T1]{fontenc}
@@ -45,7 +45,9 @@ Style2*=\tiny$\blacksquare$ ,Style3*=$\circ$ ,Style4*=-- )
 \newtheorem{theorem}{Theorem}
 \newtheorem{lemma}{Lemma}
 \newtheorem{prop}{Proposition}
+\newtheorem{proposition}{Proposition}
 \newtheorem{defn}{Definition}
+\DeclareMathOperator*{\argmax}{arg\,max}
 
 \usepackage{eqparbox}
 \usepackage{textcomp}

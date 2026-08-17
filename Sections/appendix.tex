@@ -1,6 +1,54 @@
 \titleformat{\chapter}{\normalfont\huge\bfseries}{}{1em}{}
 
-\chapter{Appendix 附錄}
+\chapter{Appendix}
 \label{ch:appendix}
 
-附錄資料
+\section{Detailed Experimental Notes}
+
+本附錄整理 PaceANN 的一些補充觀察，這些內容對理解主要結果有幫助，
+但若全部放入正文會讓章節過於冗長。
+
+\begin{table}[!ht]
+  \centering
+  \caption{SIFT100M cache sweep 的代表性結果摘要。}
+  \label{tab:cache-sweep}
+  \begin{tabular}{lcccc}
+    \toprule
+    System & Total RAM & R$\geq$0.95 QPS & R$\geq$0.97 QPS & R$\geq$0.98 QPS \\
+    \midrule
+    baseline & 1.7 GB & 1,021 & 768 & 591 \\
+    cache\_1.3gb & 3.0 GB & 2,078 & 1,301 & 669 \\
+    cache\_2.0gb & 3.7 GB & 2,112 & 1,308 & 1,100 \\
+    Starling & 3.1 GB & 1,326 & 1,041 & 698 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+從這組結果可以看到，當 cache 預算達到一定程度後，PaceANN 會跨過與 Starling 的交會點，
+並在中高 recall 區間取得更高的 QPS。相反地，若 cache 太小，額外的管理成本會抵銷收益，
+因此小型 cache 反而可能比 baseline 更差。
+
+\section{Notation}
+
+\begin{table}[!ht]
+  \centering
+  \caption{本文使用的重要符號。}
+  \label{tab:notation}
+  \begin{tabular}{p{2.5cm} p{8.5cm}}
+    \toprule
+    Symbol & Meaning \\
+    \midrule
+    $L$ & Beam search 的候選列表大小 \\
+    $k$ & Top-$k$ 最近鄰數量 \\
+    $\theta$ & Early termination 的放寬因子 \\
+    $K$ & Medoid 的數量 \\
+    $N$ & Layer 1 的總快取預算 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Reproducibility Note}
+
+PaceANN 的結論以特定資料集與特定 server configuration 為基礎。
+若要重現這些數字，需同時控制資料集版本、索引參數、warm-up 次數、並發度與 ET 參數，
+否則不同實驗之間的數字可能無法直接比較。

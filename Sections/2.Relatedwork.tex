@@ -1,7 +1,50 @@
 \chapter{Related Work}
 \label{ch:relatedwork}
-通常第二段就是寫相關的參考文獻, 只有cite到的文章才會出現編號並且出現在最後面. 舉例來說, 如果在ref.bib裡放了10篇論文, 可是內文只有cite其中五篇, 編譯出來的結果就只會顯示這五篇. Ref有很多種風格寫法, 本篇論文是採用bibliographystyle\{IEEEtran\}, 
-overleaf上有其他style語法, 可以參考: \\
-https://www.overleaf.com/learn/latex/Bibtex\_bibliography\_styles
 
-This is related work. The PID issue has been widely studied in the field of computer vision and IoT by using various devices. In the field of computer vision, camera is the most popular device. Face recognition technologies are surveyed in \cite{zhao2003face}. Reference \cite{parkhi2015deep} focuses on how to collect a very large training dataset and build a very deep CNN model for face recognition, but training process is extremely computationally expensive. A hybrid RFID and computer vision system for localization and tracking of RFID tags is proposed in \cite{goller2014fusing}. Reference \cite{isasi2010location} presents a solution which combines RFID with object tracking through cameras. Reference \cite{germa2010vision} presents a fusion system consisting of an RFID reader and a camera crew on a mobile robot platform to track people. These works \cite{goller2014fusing},\cite{isasi2010location},\cite{germa2010vision} fuse data from camera and RFID, but their accuracy highly depends on the density of RFID antennas. Thus, they are not suitable for longer range PID. Reference \cite{munaro2014fast} proposes a fast multi-people tracking algorithm for service robots through RGB-D camera. In \cite{spinello2011people}, people detection is realized by dense depth data, called Histogram of Oriented Depths (HOD). 
+PaceANN 的設計建立在三條研究脈絡之上：磁碟式 graph ANN、page-based search，以及早停式搜尋控制。
+這些工作共同指出，當資料規模進入百萬到十億級時，搜尋時間不再只由距離計算主導，
+而是受到索引布局、I/O 模式與 query 難度分布共同影響。
+
+\section{Disk-based Graph ANN}
+
+DiskANN 是磁碟式 graph ANN 的代表作之一。
+其核心優勢在於以壓縮碼與圖結構將大量向量索引化，讓系統即使在有限 DRAM 下仍能支援超大規模搜尋\cite{subramanya2019diskann}.
+後續的 SPANN 延伸了這條路線，強調在大規模環境中透過 partition 與近似結構提升實際可部署性\cite{chen2021spann}.
+DiskANN++ 則進一步嘗試針對 query-sensitive search 與 page-based traversals 做優化，
+顯示出「單純依賴圖連結」並不足以完全解決磁碟搜尋成本\cite{ni2023diskannpp}.
+
+這些方法的共同限制是：當搜尋路徑需要大量隨機讀取時，效能會迅速受制於 I/O latency。
+即便讀取資料頁的數量不高，若每個 hop 的候選展開仍需回到磁碟，吞吐量便會受到顯著影響。
+PaceANN 的動機正是要在不改變 DiskANN 基本索引語義的前提下，進一步減少這種 traversal I/O。
+
+\section{Page Layout and Search Reordering}
+
+Starling 提出將 graph traversal 與 page layout 緊密對齊的思路。
+它透過 block shuffling 讓單一 page 內包含更高比例的鄰近節點，並搭配 memory navigation graph
+縮短搜尋路徑，從而提升每次 page read 的有效資訊量\cite{wang2024starling}.
+這個方向的關鍵洞察是：對磁碟式 ANN 而言，減少 page 數量不一定足夠，還必須提高每次讀取的資訊密度。
+
+然而，page layout 的效果高度依賴離線重排與靜態索引假設。
+若資料持續更新，新的節點未必能立即享有重排後的 locality；若記憶體預算降低，
+navigation graph 的品質也可能下降，進而讓 search path 變長。
+因此，page-based 方法雖然在固定測試設定下表現亮眼，卻不一定適合所有生產工作負載。
+
+\section{Early Termination for ANN Search}
+
+早停式搜尋的核心思想是：不同 query 的難度不一樣，因此不應對所有 query 都使用相同搜尋預算。
+Learned adaptive early termination 提供了一種將搜尋進展與終止條件連結的思路\cite{li2020adaptiveet}，
+而 DARTH 進一步把 recall 目標顯式化，主張可以在 per-query 的層級上根據收斂情況決定是否停止\cite{chatzakis2025darth}.
+Patience in Proximity 則從 HNSW traversal 出發，提出以結果穩定性作為停止依據的簡潔策略\cite{teofili2025patience}.
+
+這些研究共同說明，fixed-parameter search 很難同時照顧 easy query 與 hard query。
+若參數調得保守，easy query 會浪費過多 hops；若參數調得激進，hard query 的 recall 又可能受損。
+PaceANN 的 ET 設計採取較直接的 frontier-vs-top-$k$ 比較，目的在於把 query-adaptive 的概念帶回 DiskANN 搜尋主迴圈中，
+讓終止條件能夠隨查詢進展即時調整。
+
+\section{Positioning of PaceANN}
+
+綜合以上文獻，PaceANN 不是試圖取代圖式索引或 page-based 方法，而是從另一個角度處理同一問題：
+在保留 DiskANN 索引結構的前提下，以 DRAM cache 與 adaptive ET 降低無效的磁碟讀取與候選展開。
+和 Starling 相比，PaceANN 不依賴全新的 page layout；和傳統 DiskANN 相比，
+PaceANN 又能透過快取與 early stopping 明顯減少查詢成本。
+這種設計讓它特別適合高 recall、需要 server-side 並發處理、且資料更新頻繁的環境。
