@@ -13,11 +13,11 @@
 兩者必須協同設計，才能構成一個自洽的系統。
 
 本章按以下順序展開：
-首先建立快取選擇策略的形式基礎（§\ref{sec:topology}），
-其次分別描述兩層快取（§\ref{sec:l1}、§\ref{sec:l2}），
-再正式定義 ET 條件及其可靠性前提（§\ref{sec:et}），
-最後論證快取與 ET 的協同必要性（§\ref{sec:codesign}），
-並說明 server 模式下的並發架構（§\ref{sec:server}）。
+首先建立快取選擇策略的形式基礎，並說明為何靜態覆蓋不足、必須採用動態快取（§\ref{sec:topology}）；
+其次描述並發感知動態快取的設計（§\ref{sec:cache}），
+再正式定義收斂感知早停（ET）條件及其可靠性前提（§\ref{sec:et}），
+接著論證快取與 ET 的協同必要性（§\ref{sec:codesign}），
+最後說明 server 模式下的並發架構（§\ref{sec:server}）。
 
 %-------------------------------------------------------------
 \section{快取節點選擇的拓撲基礎}
@@ -57,90 +57,46 @@ $d_G = 1$ 的節點（$m^*$ 的直接鄰居）會在第一個 hop 全部被納�
 
 \paragraph{命題的設計推論}
 
-命題~\ref{prop:monotone} 有三個直接推論，
-共同支撐後續的快取設計：
+命題~\ref{prop:monotone} 有兩個直接推論：
 
 \begin{enumerate}
-  \item \textbf{最優快取集合可在服務任何查詢之前被確定。}
-    高頻節點完全由圖拓撲決定，與查詢分布無關，
+  \item \textbf{medoid 鄰域是全域最高頻的區域，且可在服務任何查詢之前被識別。}
+    最靠近 medoid 的節點其存取頻率完全由圖拓撲決定，與查詢分布無關，
     因此系統啟動時（index 載入後）即可精確識別，無需任何查詢歷史。
 
-  \item \textbf{BFS 從 medoid 出發是最優的快取選擇策略。}
-    以廣度優先搜尋（BFS）從 $m^*$ 展開，按層序選取節點，
-    恰好等價於按 $d_G(v, m^*)$ 從小到大排序——即按期望訪問頻率從高到低選取。
-    在固定預算 $N$ 下，此選擇策略的命中率最大化。
-
-  \item \textbf{隨機採樣是次優的。}
-    以隨機採樣選取快取節點時，
-    節點按 $d_G$ 均勻分布，大量高 $d_G$（低頻）節點佔據預算，
-    而最高頻的 medoid 鄰域並未獲得優先保護。
-    這解釋了為何 Starling 的隨機採樣 navigation graph
-    在相同 DRAM 預算下命中率低於 BFS-from-medoid 策略。
+  \item \textbf{BFS-from-medoid 是最佳的\emph{冷啟動種子}策略。}
+    以廣度優先搜尋（BFS）從 $m^*$ 展開、按層序選取節點，
+    恰好等價於按 $d_G(v, m^*)$ 由小到大排序——即按期望訪問頻率由高到低選取。
+    因此在快取尚無查詢歷史的冷啟動階段，以 BFS-from-medoid 預填快取，
+    能立即保護最高頻的入口鄰域（隨機採樣則會讓大量低頻節點佔據預算，故次優；
+    這也解釋了 Starling 的隨機採樣 navigation graph 為何命中率偏低）。
 \end{enumerate}
 
-\paragraph{多 medoid 圖的延伸：分片均等預算}
+\paragraph{為何種子不足以取代動態快取}
 
-當索引包含多個 medoid（$|M| = K$，常見於分片式大規模索引）時，
-若將全部預算集中在單一 medoid 的 BFS 展開，
-其他分片的入口鄰域將完全未被覆蓋，形成嚴重的命中率不均衡。
-
-本設計採用\textbf{分片均等預算（Per-shard Equal Budget）}策略：
-將總預算 $N$ 平均分配為 $N/K$ 給每個 medoid，
-各自獨立執行 BFS 到容量耗盡。
-此策略確保所有搜尋入口的初期 hop 均有快取覆蓋，
-避免部分查詢從第一個 hop 就必須觸發 SSD 讀取，
-從而維持 ET 可靠性所需的早期 top-$k$ 品質（詳見 §\ref{sec:codesign}）。
-
-%-------------------------------------------------------------
-\section{Layer 1：拓撲感知靜態快取}
-\label{sec:l1}
-%-------------------------------------------------------------
-
-Layer 1 基於 §\ref{sec:topology} 的分析，
-在系統啟動時執行一次 BFS-from-medoid，
-並將覆蓋到的節點的鄰居列表永久存放於 DRAM。
-
-\paragraph{資料結構}
-
-Layer 1 使用以 \texttt{node\_id} 為索引的雜湊表，
-映射至 DRAM 中連續配置的鄰居列表陣列：
-
-\begin{center}
-\texttt{unordered\_map<uint32\_t, const uint32\_t*>  l1\_index}\\
-\texttt{uint32\_t  l1\_data[N\_L1][MAX\_DEGREE]}
-\end{center}
-
-Lookup 路徑：一次雜湊表查找（$O(1)$，~5\,ns），
-返回鄰居陣列指標，無記憶體複製。
-
-\paragraph{關鍵設計選擇：永不驅逐}
-
-Layer 1 的節點在系統整個生命週期內不會被驅逐。
-這個選擇源自命題~\ref{prop:monotone}：
-BFS-from-medoid 選出的節點是理論上全域最高頻的集合，
-任何驅逐都意味著用低頻節點替換高頻節點，
-必然降低整體命中率。
-
-永不驅逐的設計也帶來讀取路徑的零同步開銷——
-Layer 1 的雜湊表和鄰居陣列建構後不再修改，
-多個 reader thread 可無鎖並行查找。
-
-\paragraph{Layer 1 的覆蓋深度與 ET 可靠性的關係}
-
-Layer 1 的設計容量決定了 BFS 能展開到 medoid 幾跳以內的節點（稱為覆蓋深度 $D$）。
-$D$ 越大，beam search 的前期 hop 越多能命中 Layer 1（~5\,ns），
-top-$k$ 越快達到穩定，ET 的 PQ 比值信號越可靠。
-具體的 $D$ 與 ET 可靠性之間的量化關係在 §\ref{sec:codesign} 中論述。
+然而，medoid 鄰域的高頻性\emph{並不}意味著靜態覆蓋就足夠。
+每個查詢真正耗時的節點集中在\textbf{該查詢的收斂區}——
+即 beam search 逼近 query 時、答案附近才被展開的節點；
+這些節點是\emph{查詢專屬}的，且會隨查詢分布（例如 RAG 的熱門主題）持續漂移，
+無法被任何在系統啟動時固定的集合覆蓋（第~\ref{ch:motivation}~章 O3）。
+換言之，BFS 種子蓋得住\emph{入口熱區}，卻蓋不住\emph{各查詢的收斂熱區}。
+這正是 PaceANN 不採用永久靜態快取、而以\textbf{並發感知動態快取}（§\ref{sec:cache}）
+在查詢期間依實際存取分布持續演化的原因；BFS-from-medoid 僅作為其冷啟動種子。
+對多 medoid 索引（$|M| = K$），種子採\textbf{分片均等預算}：
+總預算平均分配為 $N/K$ 給每個 medoid 各自 BFS，避免部分入口鄰域在冷啟動時完全未覆蓋。
 
 %-------------------------------------------------------------
-\section{Layer 2：需求驅動動態快取（BNC）}
-\label{sec:l2}
+\section{並發感知動態快取（BNC）}
+\label{sec:cache}
 %-------------------------------------------------------------
 
-Layer 1 的靜態覆蓋固定於系統啟動時決定的 $N$ 個節點。
-對於實際查詢中頻繁出現、卻落在 Layer 1 覆蓋深度之外的節點，
-系統需要一個能夠動態適應工作負載的機制。
-Layer 2（BoundedNeighborCache，BNC）承擔這個角色。
+如 §\ref{sec:topology} 所述，靜態覆蓋只能保護入口熱區，
+無法涵蓋各查詢專屬、且隨分布漂移的收斂熱區。
+因此 PaceANN 的快取以\textbf{需求驅動的動態快取}為主體
+（BoundedNeighborCache，BNC），在固定記憶體預算內於查詢期間持續演化，
+自動反映實際工作負載的存取模式；
+系統啟動時以 §\ref{sec:topology} 的 BFS-from-medoid 種子預填，消弭冷啟動初期的空窗，
+其後即交由 BNC 的替換策略託管，平滑演化至當前 workload 的分布。
 
 \paragraph{設計約束}
 
@@ -200,19 +156,14 @@ BNC 在快取項目中\textbf{共同儲存節點的原始座標}（raw uint8 coo
 代價是每個 BNC entry 需要額外儲存 $d_\text{raw}$ bytes 的座標（例如 128 bytes for uint8 SIFT），
 在記憶體預算配置時需一併納入計算。
 
-\paragraph{需求驅動的快取暖身}
+\paragraph{需求驅動填充與冷啟動}
 
-BNC 採用\textbf{需求驅動（demand-fill）}策略：
-快取僅在某個節點的鄰居列表被從 SSD 讀取後才被填入，
-而非在系統啟動時批量預載。
-這意味著 BNC 在冷啟動時命中率為零，需要若干次查詢後才達到穩態。
-在 server 部署時，系統通常會以代表性查詢集執行一次\textbf{暖機（warmup）}，
-使 BNC 在服務真實流量前達到穩態命中率。
-
-需求驅動的優點是 BNC 自動反映實際工作負載的存取模式，
-適應查詢分布的動態變化；缺點是暖機期間的冷啟動效能較差。
-Layer 1 的靜態覆蓋恰好彌補了這個弱點：
-即使 BNC 尚未暖機，Layer 1 仍能保護最高頻的 medoid 鄰域。
+除了啟動時的 BFS 種子外，BNC 採用\textbf{需求驅動（demand-fill）}策略：
+節點的鄰居列表在首次從 SSD 讀取後才被填入，而非批量預載。
+如此 BNC 自動反映實際工作負載的存取模式，並隨查詢分布的變化持續適應。
+冷啟動初期的入口空窗由 BFS 種子（§\ref{sec:topology}）填補，
+其餘的收斂熱區則在服務過程中透過 demand-fill 逐步累積、由 CLOCK 替換策略託管；
+因此系統\emph{不依賴}預先的代表性查詢暖機，即可在真實流量下平滑收斂至穩態命中率。
 
 %-------------------------------------------------------------
 \section{PQ 引導的自適應早停}
@@ -222,20 +173,23 @@ Layer 1 的靜態覆蓋恰好彌補了這個弱點：
 早停的核心邏輯在 §\ref{sec:mot-insight} 已引入；
 本節給出正式定義，並說明關鍵設計參數的含義。
 
-\paragraph{停止條件}
+\paragraph{停止條件：跨尺度精確門檻}
 
-在 beam search 的每次展開前（展開第 $t$ 個候選時），
-計算以下比值：
+在 beam search 每次展開前，取 retset 中 PQ 下界最小的未展開候選 $v_\text{best\text{-}unexp}$，
+將其 PQ 下界 $d_\text{PQ}(q, v_\text{best\text{-}unexp})$ 與\emph{已讀回全精度向量}算得的、
+目前第 $2k$ 名候選的\textbf{精確}距離 $d_\text{exact}(q, v_{2k})$ 相比：
 
 \begin{equation}
-  r_t = \frac{d_\text{PQ}(q,\, v_\text{best\text{-}unexp})}{d_\text{PQ}(q,\, v_{k\text{th}})}
-  \label{eq:et-ratio}
+  d_\text{PQ}(q,\, v_\text{best\text{-}unexp}) \;>\; \theta \cdot d_\text{exact}(q,\, v_{2k})
+  \label{eq:et-gate}
 \end{equation}
 
-其中 $v_\text{best\text{-}unexp}$ 是 retset 中具有最小 PQ 距離的未展開節點，
-$v_{k\text{th}}$ 是當前 top-$k$ 中的第 $k$ 個節點。
-
-若 $r_t > \theta$（$\theta \geq 1$），則終止搜尋，返回當前 top-$k$。
+若成立，代表 frontier 中最有希望候選的\emph{樂觀}下界都已劣於現有第 $2k$ 名的\emph{實際}距離，
+繼續展開幾乎不可能改變 top-$k$，即可終止並返回。
+此設計刻意採「跨尺度」比較——待展開端用便宜的 PQ 下界、已收斂端用精確距離——
+並以第 $2k$ 名（而非第 $k$ 名）為門檻，為 recall 預留保守邊界。
+$d_\text{exact}$ 使用 traversal 過程中已讀回的全精度向量（含 BNC co-storage 命中者），
+因此此判斷\emph{不額外觸發任何 SSD I/O}。
 
 \paragraph{$\theta$ 的語義}
 
@@ -255,22 +209,24 @@ $\theta$ 的最優值依賴資料集的 PQ 壓縮誤差分布，
 $\theta$ 的最優點不同。
 參數敏感性分析在第~\ref{ch:method}~章中呈現。
 
-\paragraph{Hop Budget 安全網}
+\paragraph{Patience 與最小 hop 數安全網}
 
-在搜尋初期（hop 1\textasciitilde 3），
-top-$k$ 尚未有足夠候選，$d_\text{PQ}(q, v_{k\text{th}})$ 可能偏小，
-人為拉高 $r_t$，導致 ET 在搜尋才剛開始時就錯誤觸發。
+單一 hop 的 PQ 下界可能因量化噪聲短暫越過門檻，
+而搜尋最初期（hop 1\textasciitilde 3）top-$k$ 尚未有足夠候選、$d_\text{exact}(q, v_{2k})$ 亦不穩定，
+兩者都可能造成假陽性終止。系統以兩道安全網防範：
 
-為防止此類假陽性，系統維護一個最小 hop 數（$t_\text{min}$）：
 \begin{equation}
-  \text{Stop iff } r_t > \theta \text{ AND } t \geq t_\text{min}
+  \text{Stop iff } \big(\text{式}~\eqref{eq:et-gate}\ \text{連續成立 } P \text{ 個 hop}\big)
+  \ \text{AND}\ t \geq t_\text{min}
   \label{eq:et-guard}
 \end{equation}
 
-$t_\text{min}$ 通常設為 Layer 1 的覆蓋深度 $D$，
-確保 ET 只在前 $D$ 個 hop 的快取覆蓋完成後才允許觸發。
-當 Layer 1 提供充足的初期覆蓋時，$t_\text{min}$ 的約束幾乎不構成額外限制，
-因為 ET 的有效觸發點通常在 hop 5\textasciitilde 7，遠超 $t_\text{min}$。
+其一是 \textbf{patience 計數}：唯有式~\eqref{eq:et-gate} 連續在 $P$ 個 hop 都成立才真正終止
+（典型 $P \approx 6$），過濾單跳噪聲造成的偽觸發。
+其二是\textbf{最小 hop 數} $t_\text{min}$：在前 $t_\text{min}$ 個 hop 內一律不允許 ET，
+確保 top-$k$ 累積到足夠穩定後才開始判斷。
+兩者皆不依賴任何靜態快取層——收斂端的精確距離由 traversal 已讀回、
+並由動態快取 co-storage 保存的全精度向量提供。
 
 %-------------------------------------------------------------
 \section{快取與早停的協同必要性}
@@ -283,7 +239,7 @@ $t_\text{min}$ 通常設為 Layer 1 的覆蓋深度 $D$，
 
 \paragraph{情況一：有快取無 ET}
 
-若只部署快取（Layer 1 + BNC），
+若只部署動態快取（BNC），
 beam search 仍按固定 $L$ 執行完整的 hop 序列。
 此時所有 hop 的 SSD 讀取被快取命中替換為 DRAM 存取（~10\,ns），
 traversal 成本大幅降低，但\textbf{hop 數本身未減少}。
@@ -313,20 +269,19 @@ ET 的比值 $r_t$ 容易出現假陽性，迫使 $\theta$ 設定得非常保守
 兩者協同時：
 
 \begin{enumerate}
-  \item Layer 1 覆蓋 medoid 附近的前 $D$ 跳，使前期 top-$k$ 以 DRAM 速度快速填充。
-  \item 達到充分覆蓋後（通常在 hop 5\textasciitilde 6），
-    $d_\text{PQ}(q, v_{k\text{th}})$ 已穩定，
-    ET 可以在較小的 $\theta$ 下可靠觸發。
+  \item 動態快取（含 BFS 種子與 demand-fill 累積的熱點）使前期 top-$k$ 以 DRAM 速度快速填充，
+    並透過 co-storage 直接提供收斂端所需的\emph{精確}距離 $d_\text{exact}$。
+  \item top-$k$ 穩定後（通常在 hop 5\textasciitilde 6），$d_\text{exact}(q, v_{2k})$ 可靠，
+    ET 的跨尺度門檻得以在較小的 $\theta$ 下穩定觸發。
   \item ET 在收斂點停止，消除後續的無效 hop——
     這些 hop 即使在快取命中的情況下也是純粹的 DRAM 與 CPU 浪費。
-  \item BNC 在 Layer 1 未覆蓋的深層區域繼續保護命中，
-    使 ET 之前的有效 hop 更快完成，進一步縮短整體延遲。
+  \item 快取在收斂區持續命中，使 ET 之前的有效 hop 更快完成，進一步縮短整體延遲。
 \end{enumerate}
 
 在此協同下，一個 query 的服務路徑可形式化為：
 
 \begin{equation}
-  \text{Latency} = \underbrace{h^* \cdot c_\text{DRAM}}_{\text{有效 hop（Layer 1+BNC）}}
+  \text{Latency} = \underbrace{h^* \cdot c_\text{DRAM}}_{\text{有效 hop（動態快取）}}
                  + \underbrace{0}_{\text{無效 hop（ET 阻止）}}
                  + \underbrace{K \cdot c_\text{SSD\_rerank}}_{\text{re-rank（有 coord-co-storage 時 = 0）}}
   \label{eq:latency-model}
@@ -404,13 +359,11 @@ server 返回 top-$K$ 的 node IDs 與精確距離。
 \toprule
 元件 & 設計選擇 & 理論依據 \\
 \midrule
-Layer 1 快取策略 & BFS-from-medoid & 存取頻率單調遞減性（命題~\ref{prop:monotone}）\\
-Layer 1 容量分配 & 分片均等預算 & 防止多 medoid 圖的命中率不均 \\
-Layer 1 替換策略 & 永不驅逐 & 高頻節點的最優快取集合為靜態集合 \\
-Layer 2 替換策略 & CLOCK（256 shard） & 高並發讀取下 CLOCK > LRU（省去 unique-lock 更新）\\
-Layer 2 座標儲存 & 與鄰居 ID 共存 & 消除 re-rank 的 SSD I/O \\
-ET 停止條件 & PQ 距離比值 $> \theta$ & 零額外 I/O 的收斂代理信號 \\
-ET 安全網 & Hop budget $t_\text{min}$ & 防止 top-$k$ 未穩定時的假陽性終止 \\
+動態快取冷啟動 & BFS-from-medoid 種子（分片均等預算） & 存取頻率單調遞減性（命題~\ref{prop:monotone}）；僅作冷啟動 \\
+快取替換策略 & CLOCK（256 shard） & 高並發讀取下 CLOCK > LRU（省去 unique-lock 更新）\\
+快取座標共存 & 鄰居 ID 與全精度向量共存 & 消除 re-rank 的 SSD I/O，並供 ET 精確距離 \\
+ET 停止條件 & 跨尺度精確門檻 $d_\text{PQ} > \theta\, d_\text{exact}(2k)$ & 零額外 I/O 的收斂信號 \\
+ET 安全網 & patience $P$ + 最小 hop $t_\text{min}$ & 防止單跳噪聲與 top-$k$ 未穩定的假陽性 \\
 I/O 並發控制 & $W_\text{eff} = N / A$ & 動態平衡 NVMe 佇列深度與搜尋寬度 \\
 \bottomrule
 \end{tabular}

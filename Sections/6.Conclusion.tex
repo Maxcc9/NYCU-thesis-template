@@ -1,25 +1,25 @@
 \chapter{Conclusions}
 \label{ch:conclusion}
 
-本論文提出 PaceANN，一個以 DiskANN 為基礎、透過分層快取與 adaptive early termination 加速的磁碟式 ANNS 系統。
+本論文提出 PaceANN，一個以 DiskANN 為基礎、透過自適應快取（adaptive cache）與提前終止（early termination）兩個機制加速的磁碟式 ANNS 系統。
 與單純依賴圖式索引或 page layout 的做法不同，PaceANN 的重點在於保留原始索引語義，
 並在搜尋階段逐步降低不必要的 traversal I/O 與無效展開。
 
-從實驗結果來看，PaceANN 的兩層快取能有效提升查詢吞吐量，
-而 $\theta$-ET 則能在不顯著增加記憶體成本的前提下，進一步改善 high-recall 區間的 QPS。
-在 SIFT100M server mode 的主要比較中，PaceANN 於指定 recall 門檻下超越 DiskANN baseline，
-並在較小記憶體預算下超越 Starling full configuration，顯示這條路線具有實際的系統價值。
+從實驗結果來看，PaceANN 的自適應快取能在具有查詢局部性的工作負載上有效提升查詢吞吐量並降低尾延遲，
+而提前終止則能在不顯著增加記憶體成本的前提下，進一步改善 high-recall 區間的 QPS。
+在伺服器模式的主要比較中，PaceANN 於相同召回率（iso-recall）門檻下超越 DiskANN baseline，
+並在相同記憶體預算下相較於 Starling 具備競爭力，顯示這條路線具有實際的系統價值。
 
 不過，本研究也揭示了幾個限制。
-首先，Layer 2 在高並發下可能出現 shard contention，表示快取設計仍有進一步並行化空間。
+首先，自適應快取在高並發下可能出現 shard contention，表示快取設計仍有進一步並行化空間。
 其次，ET 的最佳 $\theta$ 值會受到並發度與 recall 目標影響，沒有一組固定參數能同時適用所有工作負載。
 最後，目前的評估仍以 SIFT100M 為主，後續若能在更多資料集與 streaming update 場景下驗證，
 PaceANN 的結論會更具一般性。
 
 未來工作可從三個方向展開。
-第一，將 Layer 2 改成更低競爭的 concurrent cache 結構，以改善高並發 scaling。
+第一，將自適應快取改成更低競爭的 concurrent cache 結構，以改善高並發 scaling。
 第二，加入 coordinate cache 或分離式磁碟布局，讓 cache hit 節點可以少一次 re-rank disk read。
 第三，把 PaceANN 的 ET 思路延伸到更多 ANN family，驗證這種 query-adaptive stopping rule 是否具有更廣泛的適用性。
 
-總結來說，PaceANN 的貢獻不是用單一技巧壓過所有對手，而是把「快取、搜尋與終止」三個層次整合成一個可落地的系統。
+總結來說，PaceANN 的貢獻不是用單一技巧壓過所有對手，而是把自適應快取與提前終止兩個機制整合成一個可落地的系統。
 在大規模向量搜尋持續朝高並發與高 recall 發展的趨勢下，這種兼顧實用性與可解釋性的設計方向值得繼續探索。

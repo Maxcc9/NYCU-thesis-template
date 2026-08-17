@@ -241,28 +241,26 @@ $L$ 越大，recall 越高，但每次查詢的 hop 數與 I/O 量越多。
 \centering
 \caption{消融研究的系統設定組合}
 \label{tab:ablation}
-\begin{tabular}{llll}
+\begin{tabular}{lll}
 \toprule
-設定代號 & Layer 1 & BNC (Layer 2) & Early Termination \\
+設定代號 & 動態快取（BNC） & Early Termination \\
 \midrule
-\texttt{baseline}      & \texttimes & \texttimes & \texttimes \\
-\texttt{L1\_only}      & \checkmark & \texttimes & \texttimes \\
-\texttt{BNC\_only}     & \texttimes & \checkmark & \texttimes \\
-\texttt{cache\_only}   & \checkmark & \checkmark & \texttimes \\
-\texttt{ET\_only}      & \texttimes & \texttimes & \checkmark \\
-\texttt{full}          & \checkmark & \checkmark & \checkmark \\
+\texttt{baseline}    & \texttimes & \texttimes \\
+\texttt{cache\_only} & \checkmark & \texttimes \\
+\texttt{ET\_only}    & \texttimes & \checkmark \\
+\texttt{full}        & \checkmark & \checkmark \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 每組設定的 QPS-recall Pareto 差距揭示對應元件的邊際貢獻：
 \begin{itemize}
-  \item \texttt{BNC\_only} vs. \texttt{baseline}：
-    量化快取命中率帶來的 I/O 節省。
+  \item \texttt{cache\_only} vs. \texttt{baseline}：
+    量化動態快取命中率帶來的 I/O 節省。
   \item \texttt{ET\_only} vs. \texttt{baseline}（cold cache）：
     在無快取保護下，ET 的 recall 損失（反映假陽性終止的嚴重性）。
   \item \texttt{full} vs. \texttt{cache\_only}：
-    在快取已充分覆蓋的前提下，ET 的額外貢獻。
+    在快取已覆蓋收斂區的前提下，ET 的額外貢獻。
   \item \texttt{full} vs. \texttt{ET\_only}：
     量化快取對 ET 可靠性的「使能效應」。
 \end{itemize}
