@@ -1,44 +1,417 @@
-\chapter{System Model}
-\label{ch:architecture}
+%=============================================================
+\chapter{System Design}
+\label{ch:arch}
+%=============================================================
 
-如果想在latex裡面插入表格, 可以搜尋latex table generator, 有很多線上網站可以參考. 我個人都是使用線上網站去產生大致的語法, 然後再根據個人喜好去做微調, wikibook有很多資料可以參考, 網址在這邊: https://en.wikibooks.org/wiki/LaTeX/Tables
+% ─── 章節破題 ───────────────────────────────────────────────
+第~\ref{ch:motivation}~章的分析揭示了兩個獨立但相互影響的問題：
+其一，beam search 中大多數 hop 是可消除的無效工作（O1、O2）；
+其二，收斂偵測的可靠性依賴於搜尋初期的 top-$k$ 覆蓋品質（O3）。
+這兩個問題共同決定了 PaceANN 的設計空間：
+\textbf{只改動 ET 不改動快取，終止信號不可靠；
+只改動快取不改動 ET，I/O 節省有上限。}
+兩者必須協同設計，才能構成一個自洽的系統。
 
-如果要引用表格, 記得在table裡加上label的語法, 然後就可以呼叫 Tab~\ref{tab1}, 寫中文的就是表~\ref{tab1}. 通常Table的caption是寫在表格的上面, 圖片則是放在下面.
+本章按以下順序展開：
+首先建立快取選擇策略的形式基礎（§\ref{sec:topology}），
+其次分別描述兩層快取（§\ref{sec:l1}、§\ref{sec:l2}），
+再正式定義 ET 條件及其可靠性前提（§\ref{sec:et}），
+最後論證快取與 ET 的協同必要性（§\ref{sec:codesign}），
+並說明 server 模式下的並發架構（§\ref{sec:server}）。
 
-\begin{table}[!ht]
-    \centering
-    \caption{This is a table.}
-    \label{tab1}
-    \begin{tabular}{|l|l|l|l|}
-    \hline
-        A & 1 & 4 & 7 \\ \hline
-        B & 2 & 5 & 8 \\ \hline
-        C & 3 & 6 & 9 \\ \hline
-    \end{tabular}
-\end{table}
+%-------------------------------------------------------------
+\section{快取節點選擇的拓撲基礎}
+\label{sec:topology}
+%-------------------------------------------------------------
 
-後來在圖書館的``2022 研究攻略營 論文寫作實戰技巧(顏安孜老師)''看到另一種作法，網址: http://bit.ly/3yE06Hx
+設計快取策略的第一個問題是：
+在 DRAM 預算有限的條件下，\emph{哪些節點的鄰居列表應被優先快取？}
+這個問題等價於估計各節點的存取頻率，並按頻率遞減排序選取。
 
-裡面的講義有提到Excel2LaTeX，細節可以去看圖書館的連結，裡面有放講義，下方是顏安孜老師的講義截圖。(不過我個人偏好直接使用latex的表格語法, 這種轉檔的東西有時候會怪怪的)
+\paragraph{存取頻率的拓撲決定性}
 
-\begin{figure}[htb]
-	\centering
-	\includegraphics[width=0.8\textwidth]{img/excel2latex.png}
-	\caption{Excel2LaTeX.}
-	\label{fig:excel2latex}
-\end{figure}
+在 DiskANN 的 beam search 中，
+每次查詢都從固定入口節點（medoid $m^*$）出發，
+沿 Vamana 圖的有向邊貪婪地向 query 方向逼近。
+設 $d_G(v, m^*)$ 為節點 $v$ 到 medoid 在圖上的最短路徑長度（跳數）。
 
+\begin{proposition}[存取頻率單調遞減性]
+\label{prop:monotone}
+設查詢向量服從資料集上的均勻分布，
+令 $f(v)$ 為節點 $v$ 的期望存取次數。
+則 $f(v)$ 是 $d_G(v, m^*)$ 的嚴格單調遞減函數：
+\[
+  d_G(u, m^*) < d_G(v, m^*) \implies f(u) > f(v)
+\]
+\end{proposition}
 
-\begin{table} [h]
+\begin{proof}[直觀論證]
+對任意查詢 $q$，beam search 的路徑必然起始於 $m^*$（$d_G = 0$）。
+$d_G = 1$ 的節點（$m^*$ 的直接鄰居）會在第一個 hop 全部被納入候選，
+因此被訪問的概率接近 1。
+隨著 $d_G$ 增加，到達節點 $v$ 的路徑逐漸分叉——
+不同查詢在第 $d_G$ 跳時已沿不同方向延伸，
+只有路徑恰好經過 $v$ 的查詢才會訪問它，
+故 $f(v)$ 隨 $d_G$ 的增大呈指數衰減。
+\end{proof}
+
+\paragraph{命題的設計推論}
+
+命題~\ref{prop:monotone} 有三個直接推論，
+共同支撐後續的快取設計：
+
+\begin{enumerate}
+  \item \textbf{最優快取集合可在服務任何查詢之前被確定。}
+    高頻節點完全由圖拓撲決定，與查詢分布無關，
+    因此系統啟動時（index 載入後）即可精確識別，無需任何查詢歷史。
+
+  \item \textbf{BFS 從 medoid 出發是最優的快取選擇策略。}
+    以廣度優先搜尋（BFS）從 $m^*$ 展開，按層序選取節點，
+    恰好等價於按 $d_G(v, m^*)$ 從小到大排序——即按期望訪問頻率從高到低選取。
+    在固定預算 $N$ 下，此選擇策略的命中率最大化。
+
+  \item \textbf{隨機採樣是次優的。}
+    以隨機採樣選取快取節點時，
+    節點按 $d_G$ 均勻分布，大量高 $d_G$（低頻）節點佔據預算，
+    而最高頻的 medoid 鄰域並未獲得優先保護。
+    這解釋了為何 Starling 的隨機採樣 navigation graph
+    在相同 DRAM 預算下命中率低於 BFS-from-medoid 策略。
+\end{enumerate}
+
+\paragraph{多 medoid 圖的延伸：分片均等預算}
+
+當索引包含多個 medoid（$|M| = K$，常見於分片式大規模索引）時，
+若將全部預算集中在單一 medoid 的 BFS 展開，
+其他分片的入口鄰域將完全未被覆蓋，形成嚴重的命中率不均衡。
+
+本設計採用\textbf{分片均等預算（Per-shard Equal Budget）}策略：
+將總預算 $N$ 平均分配為 $N/K$ 給每個 medoid，
+各自獨立執行 BFS 到容量耗盡。
+此策略確保所有搜尋入口的初期 hop 均有快取覆蓋，
+避免部分查詢從第一個 hop 就必須觸發 SSD 讀取，
+從而維持 ET 可靠性所需的早期 top-$k$ 品質（詳見 §\ref{sec:codesign}）。
+
+%-------------------------------------------------------------
+\section{Layer 1：拓撲感知靜態快取}
+\label{sec:l1}
+%-------------------------------------------------------------
+
+Layer 1 基於 §\ref{sec:topology} 的分析，
+在系統啟動時執行一次 BFS-from-medoid，
+並將覆蓋到的節點的鄰居列表永久存放於 DRAM。
+
+\paragraph{資料結構}
+
+Layer 1 使用以 \texttt{node\_id} 為索引的雜湊表，
+映射至 DRAM 中連續配置的鄰居列表陣列：
+
+\begin{center}
+\texttt{unordered\_map<uint32\_t, const uint32\_t*>  l1\_index}\\
+\texttt{uint32\_t  l1\_data[N\_L1][MAX\_DEGREE]}
+\end{center}
+
+Lookup 路徑：一次雜湊表查找（$O(1)$，~5\,ns），
+返回鄰居陣列指標，無記憶體複製。
+
+\paragraph{關鍵設計選擇：永不驅逐}
+
+Layer 1 的節點在系統整個生命週期內不會被驅逐。
+這個選擇源自命題~\ref{prop:monotone}：
+BFS-from-medoid 選出的節點是理論上全域最高頻的集合，
+任何驅逐都意味著用低頻節點替換高頻節點，
+必然降低整體命中率。
+
+永不驅逐的設計也帶來讀取路徑的零同步開銷——
+Layer 1 的雜湊表和鄰居陣列建構後不再修改，
+多個 reader thread 可無鎖並行查找。
+
+\paragraph{Layer 1 的覆蓋深度與 ET 可靠性的關係}
+
+Layer 1 的設計容量決定了 BFS 能展開到 medoid 幾跳以內的節點（稱為覆蓋深度 $D$）。
+$D$ 越大，beam search 的前期 hop 越多能命中 Layer 1（~5\,ns），
+top-$k$ 越快達到穩定，ET 的 PQ 比值信號越可靠。
+具體的 $D$ 與 ET 可靠性之間的量化關係在 §\ref{sec:codesign} 中論述。
+
+%-------------------------------------------------------------
+\section{Layer 2：需求驅動動態快取（BNC）}
+\label{sec:l2}
+%-------------------------------------------------------------
+
+Layer 1 的靜態覆蓋固定於系統啟動時決定的 $N$ 個節點。
+對於實際查詢中頻繁出現、卻落在 Layer 1 覆蓋深度之外的節點，
+系統需要一個能夠動態適應工作負載的機制。
+Layer 2（BoundedNeighborCache，BNC）承擔這個角色。
+
+\paragraph{設計約束}
+
+BNC 的設計面臨四個並行存在的約束：
+
+\begin{enumerate}
+  \item \textbf{高並發讀取}：$T = 16$ 個 worker thread 同時查找，
+    全域鎖（global lock）會形成嚴重序列化瓶頸。
+  \item \textbf{低插入頻率}：每個節點首次觸及 SSD 後插入一次，
+    之後只有被驅逐時才需再次插入，插入路徑可以承擔更高的成本。
+  \item \textbf{固定記憶體上限}：需精確控制 DRAM 使用量，
+    不能因為工作負載波動而超出預算。
+  \item \textbf{近似 LRU 語義}：淘汰最不常被近期訪問的節點，
+    但不需要精確 LRU 的 $O(1)$ doubly-linked list 維護。
+\end{enumerate}
+
+\paragraph{分片架構：256 個獨立 CLOCK 環}
+
+BNC 以 \texttt{node\_id \% 256} 將節點分配至 256 個 shard，
+每個 shard 獨立維護一個 CLOCK 替換環與一個 \texttt{shared\_mutex}：
+
+\begin{itemize}
+  \item \textbf{查找（高頻）}：取 \texttt{shared\_lock}（允許並發讀者），
+    雜湊表查找 + atomic reference bit 設定，整體約 10--20\,ns。
+    256 個 shard 使得鎖競爭降低至 $1/256$，
+    16 個 thread 平均每個 shard 的並發讀者只有 $\sim\!0.06$ 個。
+
+  \item \textbf{插入與驅逐（低頻）}：取 \texttt{unique\_lock}（互斥），
+    掃描 CLOCK hand 找到 reference bit 為 false 的 slot，
+    原地替換，成本為 $O(\text{shard capacity} / \text{hit rate})$，
+    不影響同 shard 的查找路徑（因已持有 unique lock）。
+\end{itemize}
+
+相較於精確 LRU，CLOCK 省去了每次查找時更新 doubly-linked list 的
+exclusive lock 操作，在並發讀取遠多於插入的場景下
+（正是 server mode 的典型情況），
+吞吐量與尾延遲均優於 LRU。
+
+\paragraph{座標共存（Coordinate Co-Storage）}
+
+標準 DiskANN 的搜尋流程分為兩個階段：
+（1）traversal：以 PQ 距離引導的 beam search，只需鄰居 IDs；
+（2）re-rank：取 top-$k$ 候選的完整原始向量，計算精確距離。
+Re-rank 階段需要從 SSD 讀取 $K$ 個節點的完整向量，
+即使 traversal 已全部命中快取，也仍有不可避免的 SSD 存取。
+
+BNC 在快取項目中\textbf{共同儲存節點的原始座標}（raw uint8 coordinates），
+使命中 BNC 的節點在 re-rank 時可直接從 DRAM 讀取精確向量，
+完全消除 re-rank 的 SSD I/O：
+
+\begin{center}
+\texttt{struct Entry \{ uint32\_t* neighbors;\ uint8\_t* coords;\ bool ref; \}}
+\end{center}
+
+此設計使得「BNC 命中的節點貢獻零 SSD I/O」在整個搜尋流程中成立，
+而非僅在 traversal 階段成立。
+代價是每個 BNC entry 需要額外儲存 $d_\text{raw}$ bytes 的座標（例如 128 bytes for uint8 SIFT），
+在記憶體預算配置時需一併納入計算。
+
+\paragraph{需求驅動的快取暖身}
+
+BNC 採用\textbf{需求驅動（demand-fill）}策略：
+快取僅在某個節點的鄰居列表被從 SSD 讀取後才被填入，
+而非在系統啟動時批量預載。
+這意味著 BNC 在冷啟動時命中率為零，需要若干次查詢後才達到穩態。
+在 server 部署時，系統通常會以代表性查詢集執行一次\textbf{暖機（warmup）}，
+使 BNC 在服務真實流量前達到穩態命中率。
+
+需求驅動的優點是 BNC 自動反映實際工作負載的存取模式，
+適應查詢分布的動態變化；缺點是暖機期間的冷啟動效能較差。
+Layer 1 的靜態覆蓋恰好彌補了這個弱點：
+即使 BNC 尚未暖機，Layer 1 仍能保護最高頻的 medoid 鄰域。
+
+%-------------------------------------------------------------
+\section{PQ 引導的自適應早停}
+\label{sec:et}
+%-------------------------------------------------------------
+
+早停的核心邏輯在 §\ref{sec:mot-insight} 已引入；
+本節給出正式定義，並說明關鍵設計參數的含義。
+
+\paragraph{停止條件}
+
+在 beam search 的每次展開前（展開第 $t$ 個候選時），
+計算以下比值：
+
+\begin{equation}
+  r_t = \frac{d_\text{PQ}(q,\, v_\text{best\text{-}unexp})}{d_\text{PQ}(q,\, v_{k\text{th}})}
+  \label{eq:et-ratio}
+\end{equation}
+
+其中 $v_\text{best\text{-}unexp}$ 是 retset 中具有最小 PQ 距離的未展開節點，
+$v_{k\text{th}}$ 是當前 top-$k$ 中的第 $k$ 個節點。
+
+若 $r_t > \theta$（$\theta \geq 1$），則終止搜尋，返回當前 top-$k$。
+
+\paragraph{$\theta$ 的語義}
+
+$\theta$ 控制停止條件的保守程度：
+
+\begin{itemize}
+  \item $\theta = 1.0$：frontier 中最佳候選的 PQ 距離等於 top-$k$ 邊界時即停止，
+    對 PQ 近似完全信任，較為激進。
+  \item $\theta \to \infty$：永不停止，等同原始 DiskANN。
+  \item 典型設定（$\theta \approx 1.1$\textasciitilde$1.3$）：
+    為 PQ 量化誤差預留容忍帶，
+    在保守程度與 hop 節省之間取得平衡。
+\end{itemize}
+
+$\theta$ 的最優值依賴資料集的 PQ 壓縮誤差分布，
+不同 dimension 與 segment 數量的 PQ 設定下，
+$\theta$ 的最優點不同。
+參數敏感性分析在第~\ref{ch:method}~章中呈現。
+
+\paragraph{Hop Budget 安全網}
+
+在搜尋初期（hop 1\textasciitilde 3），
+top-$k$ 尚未有足夠候選，$d_\text{PQ}(q, v_{k\text{th}})$ 可能偏小，
+人為拉高 $r_t$，導致 ET 在搜尋才剛開始時就錯誤觸發。
+
+為防止此類假陽性，系統維護一個最小 hop 數（$t_\text{min}$）：
+\begin{equation}
+  \text{Stop iff } r_t > \theta \text{ AND } t \geq t_\text{min}
+  \label{eq:et-guard}
+\end{equation}
+
+$t_\text{min}$ 通常設為 Layer 1 的覆蓋深度 $D$，
+確保 ET 只在前 $D$ 個 hop 的快取覆蓋完成後才允許觸發。
+當 Layer 1 提供充足的初期覆蓋時，$t_\text{min}$ 的約束幾乎不構成額外限制，
+因為 ET 的有效觸發點通常在 hop 5\textasciitilde 7，遠超 $t_\text{min}$。
+
+%-------------------------------------------------------------
+\section{快取與早停的協同必要性}
+\label{sec:codesign}
+%-------------------------------------------------------------
+
+本節論證快取與 ET 的協同不是「兩個獨立優化的疊加」，
+而是一個設計中的相互依賴關係：
+兩者缺少任何一個，另一個都會出現功能性的退化。
+
+\paragraph{情況一：有快取無 ET}
+
+若只部署快取（Layer 1 + BNC），
+beam search 仍按固定 $L$ 執行完整的 hop 序列。
+此時所有 hop 的 SSD 讀取被快取命中替換為 DRAM 存取（~10\,ns），
+traversal 成本大幅降低，但\textbf{hop 數本身未減少}。
+
+在 §\ref{sec:mot-diminishing} 的分析中，
+$L = 150$ 時有 70.7\% 的 hop 在收斂後才執行。
+有快取時，這些無效 hop 仍會消耗 DRAM 頻寬、BNC shard 鎖，
+以及 CPU 的 PQ 距離計算資源。
+在高並發下，DRAM 頻寬競爭與鎖競爭會成為新的瓶頸，
+原本被 SSD I/O 掩蓋的競爭現象在快取命中率提高後反而顯現。
+
+\paragraph{情況二：有 ET 無快取（冷啟動）}
+
+若只部署 ET，而沒有快取保護前期 hop，
+系統在搜尋剛起步時（hop 1\textasciitilde 3）的 top-$k$ 覆蓋不足，
+$d_\text{PQ}(q, v_{k\text{th}})$ 不穩定，
+ET 的比值 $r_t$ 容易出現假陽性，迫使 $\theta$ 設定得非常保守。
+
+在無快取的冷啟動條件下，
+即使 $\theta = 1.2$，假陽性率仍可能使 recall 損失超出可接受範圍，
+導致 $\theta$ 必須調大到 $\sim\!1.4$ 以上才能維持目標 recall。
+但此時 ET 的觸發率極低，hop 節省幅度縮水，
+相較於 baseline DiskANN 的改善微乎其微。
+
+\paragraph{協同效應：快取讓 ET 可靠，ET 讓快取的價值充分實現}
+
+兩者協同時：
+
+\begin{enumerate}
+  \item Layer 1 覆蓋 medoid 附近的前 $D$ 跳，使前期 top-$k$ 以 DRAM 速度快速填充。
+  \item 達到充分覆蓋後（通常在 hop 5\textasciitilde 6），
+    $d_\text{PQ}(q, v_{k\text{th}})$ 已穩定，
+    ET 可以在較小的 $\theta$ 下可靠觸發。
+  \item ET 在收斂點停止，消除後續的無效 hop——
+    這些 hop 即使在快取命中的情況下也是純粹的 DRAM 與 CPU 浪費。
+  \item BNC 在 Layer 1 未覆蓋的深層區域繼續保護命中，
+    使 ET 之前的有效 hop 更快完成，進一步縮短整體延遲。
+\end{enumerate}
+
+在此協同下，一個 query 的服務路徑可形式化為：
+
+\begin{equation}
+  \text{Latency} = \underbrace{h^* \cdot c_\text{DRAM}}_{\text{有效 hop（Layer 1+BNC）}}
+                 + \underbrace{0}_{\text{無效 hop（ET 阻止）}}
+                 + \underbrace{K \cdot c_\text{SSD\_rerank}}_{\text{re-rank（有 coord-co-storage 時 = 0）}}
+  \label{eq:latency-model}
+\end{equation}
+
+其中 $h^*$ 是 oracle 停止 hop，$c_\text{DRAM}$ 是每次快取命中的成本。
+這個模型代表系統在理想條件下的延遲下界，
+實際延遲高於此下界的原因主要是 BNC 命中率不為 100\%（仍有部分 SSD 讀取），
+以及 shard 鎖競爭的開銷。
+
+%-------------------------------------------------------------
+\section{Server 模式並發架構}
+\label{sec:server}
+%-------------------------------------------------------------
+
+\paragraph{執行緒模型}
+
+PaceANN server 採用固定執行緒池設計：
+$T$ 個 worker thread 各自持有一個 TCP socket 監聽，
+以及一個 thread-local scratch space（用於 retset、visited bitmap 等 per-query 狀態），
+避免跨 query 的狀態污染。
+每個連線被接受後，由空閒 worker 執行完整的搜尋流程後關閉連線，
+無需跨 thread 的工作竊取或 continuation 機制。
+
+\paragraph{在制查詢計數（Active Search Counter）}
+
+BNC 的 shard 鎖在高並發下的競爭程度取決於同時執行中的 query 數量。
+server 維護一個原子計數器 \texttt{\_active\_searches}（\texttt{std::atomic<int32\_t>}），
+在 \texttt{cached\_beam\_search} 進入時遞增、返回後遞減，
+用於為動態 I/O 並發控制提供負載信號（見下段）。
+
+\paragraph{I/O 並發控制（io\_concurrency）}
+
+在高並發時（$C \gg T$，連線排隊），
+所有 $T$ 個 thread 同時執行 beam search，
+每個 hop 最多提交 $W$ 個 SSD 讀取，
+使 $D_\text{eff}$ 在快取未命中時可達 $T \times W$。
+為控制 NVMe 佇列深度，
+系統提供 \texttt{--io\_concurrency N} 選項：
+
+\begin{equation}
+  W_\text{eff} = \min\!\left(W,\; \max\!\left(1,\; \left\lfloor \frac{N}{A} \right\rfloor\right)\right)
+  \label{eq:io-concurrency}
+\end{equation}
+
+其中 $A = \texttt{\_active\_searches}$，
+$N$ 為目標最大並發 SSD 讀取數。
+當 $A = T = 16$、$N = 64$ 時，$W_\text{eff} = 4$，
+每 hop 的 SSD 請求數下降 50\%，
+以小幅 recall 代價換取 NVMe 佇列的穩定。
+在 BNC 充分暖機的情況下，$W_\text{eff}$ 的縮減對實際 SSD 請求量的影響較小
+（因多數 hop 命中快取，frontier 中真正需要 SSD 的節點本就不多），
+主要作用是作為快取冷啟動期間的保護機制。
+
+\paragraph{二進位 TCP 通訊協定}
+
+client 透過 TCP 連線傳送固定格式的請求封包，
+包含查詢向量（float 或 uint8）、$K$、$L$、$\theta$ 與 hop\_budget；
+server 返回 top-$K$ 的 node IDs 與精確距離。
+所有計時（mean、P50、P99、P999 latency）在 server 端從\textbf{接收完整請求後}開始計算，
+不含 TCP 建連與傳輸時間，使延遲量測反映搜尋本身的計算成本。
+
+%-------------------------------------------------------------
+\section{設計摘要}
+\label{sec:design-summary}
+%-------------------------------------------------------------
+
+表~\ref{tab:design-summary} 彙整 PaceANN 各元件的設計選擇與理論依據：
+
+\begin{table}[h]
 \centering
-\caption{Comparison on model efficiency and model size.}
-\begin{tabular}{c|c|c}
-\toprule[1.25pt]
-Model   & {Training \& Test }  & {Model Size }      \\ 
+\caption{PaceANN 元件設計摘要}
+\label{tab:design-summary}
+\begin{tabular}{p{3.2cm} p{3.8cm} p{5.5cm}}
+\toprule
+元件 & 設計選擇 & 理論依據 \\
 \midrule
-LTD-GCN   & \textbf{11ms}    \& \textbf{4.5ms}       & 2.50M             \& 2.50M     \\ 
-LTD-GCN-i & \underline{13ms} \& \underline{4.6ms}    & 2.75M             \& 2.76M     \\  
-\bottomrule[1.25pt]
+Layer 1 快取策略 & BFS-from-medoid & 存取頻率單調遞減性（命題~\ref{prop:monotone}）\\
+Layer 1 容量分配 & 分片均等預算 & 防止多 medoid 圖的命中率不均 \\
+Layer 1 替換策略 & 永不驅逐 & 高頻節點的最優快取集合為靜態集合 \\
+Layer 2 替換策略 & CLOCK（256 shard） & 高並發讀取下 CLOCK > LRU（省去 unique-lock 更新）\\
+Layer 2 座標儲存 & 與鄰居 ID 共存 & 消除 re-rank 的 SSD I/O \\
+ET 停止條件 & PQ 距離比值 $> \theta$ & 零額外 I/O 的收斂代理信號 \\
+ET 安全網 & Hop budget $t_\text{min}$ & 防止 top-$k$ 未穩定時的假陽性終止 \\
+I/O 並發控制 & $W_\text{eff} = N / A$ & 動態平衡 NVMe 佇列深度與搜尋寬度 \\
+\bottomrule
 \end{tabular}
-\label{table:model_com}
 \end{table}
