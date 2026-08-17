@@ -19,10 +19,13 @@
 % 預設是LARGE, 可以換成其他比較小的語法
 % 大小依序為: LARGE > Large > large > normalsize
     \begin{minipage}[t][3cm][t]{\textwidth}
-        \centering \LARGE \chineseTitle \\
-        \centering \LARGE \englishTitle \\
+        \centering \Large \chineseTitle \\
+        \centering \Large \englishTitle \\
     \end{minipage}
-  
+
+    % 標題較長,略縮小字級並下移研究生/指導教授區塊避免重疊
+    \vspace{2cm}
+
     \fontsize{14}{14}\selectfont{
     \begin{tabular}{r l c r l}
     研\hspace{7pt}究\hspace{7pt}生： & \studentCnName & \hspace{0.6cm} & Student： & \studentEnName \\
