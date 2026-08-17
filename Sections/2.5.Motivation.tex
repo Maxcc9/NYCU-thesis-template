@@ -39,29 +39,13 @@ NVMe SSD 的隨機讀取延遲並非固定常數，
 $D = 32$ 時升至約 90\,$\mu$s，$D = 64$ 時達 131\,$\mu$s，
 約為低佇列最佳點的 2.0 倍。
 
-\paragraph{多線程的乘法效應}
-
-在 server mode 中，問題更為嚴峻。
-每個 worker thread 擁有獨立的 \texttt{io\_context\_t}，
-並行向同一 NVMe 裝置提交請求。
-系統層面的有效佇列深度為各線程提交量的總和：
-
-\begin{equation}
-  D_{\text{eff}} = \sum_{t=1}^{T} D_t
-  \label{eq:eff-qd}
-\end{equation}
-
-以排隊理論的 Little's Law 觀之（$L = \lambda W$），
-在服務率 $\mu$ 有限的條件下，
-總在制量（outstanding requests）的增加直接拉長每個請求的期望等待時間 $W$。
-當 $T = 16$ 個 thread 各自維持 beam width $W_{\text{bw}} = 8$ 的並發展開時，
-最多有 $D_{\text{eff}} = T \times W_{\text{bw}} = 128$ 個請求同時在 NVMe 佇列中，
-遠超硬體的低延遲最佳操作區間。
-
-\textbf{這意味著：每一個不必要發出的 SSD 讀取，
-都會延長系統中所有並發讀取的等待時間。}
-在高 concurrency 的 server 環境下，
-這個代價由所有 query 共同承擔。
+在 server mode 中這個問題更嚴峻。每個 worker thread 各自擁有獨立的 \texttt{io\_context\_t}，
+並行地向同一顆 NVMe 裝置提交請求，系統層面的有效佇列深度是各線程提交量的總和
+$D_{\text{eff}} = \sum_{t} D_t$。以排隊理論的 Little's Law（$L = \lambda W$）來看，
+在服務率有限時，在制請求數增加會直接拉長每個請求的期望等待時間。
+當 16 個 thread 各自維持 beam width 8 的並發展開時，最多會有約 128 個請求同時排在 NVMe 佇列裡，
+遠超硬體的低延遲操作區間。也就是說，每一個不必要發出的 SSD 讀取，
+都會延長系統中所有並發讀取的等待時間；在高並發的 server 環境下，這個代價由所有查詢共同承擔。
 
 %-------------------------------------------------------------
 \section{Beam Search 中的 I/O 邊際效益遞減現象}
