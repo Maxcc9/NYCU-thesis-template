@@ -1,37 +1,39 @@
 \begin{center}
     \large
-    
+
     \begin{singlespace}
         \textbf{\englishTitle{}} \\[0.5cm]
     \end{singlespace}
-    
+
     \begin{singlespace}
-        Student : \studentEnName{}  \hspace{1.0cm} 
-        % 兩個指導教授要寫 Advisors
-        \ifdefined\advisorCnNameB
-            Advisors: Dr.\, \advisorEnName \\
-            \hspace{6.6cm} Dr.\, \advisorEnNameB  \\
-        \else
-            Advisor: Dr.\, \advisorEnName \\
-        \fi
+        Student: \studentEnName\hspace{1.0cm}
+        Advisor: Dr.\,\advisorEnName \\
     \end{singlespace}
-    
+
     \vspace{0.5cm}
     \begin{singlespace}
         \NameofDepartmentInstituteEN\\
         National Yang Ming Chiao Tung University\\[0.2cm]
     \end{singlespace}
-    
-    \textbf{Abstract} \\[0.5cm]
 
+    \textbf{Abstract} \\[0.5cm]
 \end{center}
 
-\normalsize 
-  
-Write your abstract here. Through computer vision technologies, ...
+\normalsize
 
+Approximate nearest neighbor search (ANNS) is a core component of vector databases and recommendation systems.
+At billion scale the index no longer fits in memory, making disk-based graph indexes the mainstream approach; their query latency, however, is dominated by random disk reads.
+Existing solutions fall into two categories: graph-based indexes such as DiskANN preserve search quality under a limited memory budget but pay a substantial I/O cost during traversal,
+while page-layout optimizations such as Starling raise the information density of each read yet depend on a static layout and exhibit long tail latency under concurrent serving.
+We observe that the resulting waste is both spatial and temporal: traversal hotspots concentrate on few nodes, and a globally fixed search list size keeps easy queries expanding after their results have converged.
+To address both, we propose PaceANN, an acceleration scheme for disk-based ANNS that requires no index rebuild.
+PaceANN first introduces layered caching: Layer 1 is a static breadth-first cache rooted at the medoid, and Layer 2 is a sharded CLOCK cache that accumulates
+the neighbor lists of hot nodes at query time; a miss in both layers falls back to the original disk read path, leaving search semantics unchanged.
+PaceANN further introduces adaptive early termination, which decides a per-query stopping point inside the beam-search loop from the convergence of the current top-$k$,
+so that easy queries stop early while hard queries keep expanding.
+On SIFT100M in server mode and under an equal memory budget, PaceANN achieves 6.56$\times$ the query throughput of Starling,
+with 6.8$\times$ lower P99 and 13.8$\times$ lower P999 latency at roughly 95\% recall and a concurrency of 8.
 
 \vspace{1cm}
 
-% 5-7 Keywords (English) 
-\textbf{Keywords: English, keywords, five to seven, computer vision, IoT.} 
+\textbf{Keywords:} approximate nearest neighbor search, disk-based graph index, layered caching, early termination, tail latency
