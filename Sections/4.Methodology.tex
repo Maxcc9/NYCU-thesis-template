@@ -28,13 +28,12 @@ PaceANN 的評估涉及三個在架構上有本質差異的系統，
 
   \item[\textbf{E2}（對應 RQ2）]
     \emph{快取覆蓋如何影響 ET 的觸發可靠性？}
-    假設：在快取命中率較高的 warm BNC 條件下，
-    相同 $\theta$ 的 recall 損失低於 cold cache 條件，
-    即快取覆蓋是 ET 可靠性的前提條件。
+    假設：快取覆蓋較充分時，相同 $\theta$ 的 recall 損失較小，
+    亦即快取是 ET 可靠性的前提。
 
   \item[\textbf{E3}（對應 RQ3）]
     \emph{在等記憶體預算下，PaceANN 的 QPS-recall Pareto 是否優於 Starling？}
-    假設：在 30\% 原始資料大小的記憶體預算內，
+    假設：在相同的記憶體預算內，
     PaceANN 在 recall $\geq 0.95$ 的區間達到更高 QPS，
     且 P99 延遲不劣於 Starling。
 
@@ -76,26 +75,12 @@ SSD 在實驗前未執行其他 I/O 密集工作，確保快取狀態一致。
 \label{sec:dataset}
 %-------------------------------------------------------------
 
-\paragraph{SIFT100M}
+主要實驗使用 100M 級的磁碟式資料集（例如 SIFT100M：1 億筆 128 維 uint8 向量，原始大小約 12.8\,GB）。
+選這個規模，是因為它夠大、在有限記憶體預算下 SSD 儲存無可避免，正好對應本研究關注的磁碟式情境；
+uint8 型別也與生產環境的影像特徵一致（注意 SIFT1M 為 float32，不可混用），而且是社群常用的 benchmark，方便和文獻交叉比對。
+查詢集使用官方的 10,000 筆 query、以 top-10 精確最近鄰為 ground truth；所有量測都用完整 10,000 筆、不做截斷，以確保 recall 估計的統計穩定。
 
-主要實驗使用 SIFT100M 資料集：
-1 億筆 128 維 \textbf{uint8} 向量，
-原始大小 $100\,\text{M} \times 128\,\text{B} = 12.8\,\text{GB}$。
-選擇此資料集的理由如下：
-
-\begin{enumerate}
-  \item 規模足夠大（$10^8$），使 SSD 儲存不可避免——即使是 64\,GB 的實驗機器
-    也無法在 30\% 記憶體預算下完整保留向量索引。
-  \item 資料型別為 \textbf{uint8}，與生產環境的圖像特徵向量一致，
-    避免 float32 對結果造成的偏移（注意：SIFT1M 為 float32，不可混用）。
-  \item 學術社群有廣泛使用，方便與文獻結果交叉比對。
-\end{enumerate}
-
-查詢集使用官方 10,000 筆 query，ground truth 為 top-10 精確最近鄰（歐氏距離）。
-所有量測均使用完整 10,000 筆 query（$n_\text{total} = 10000$），
-不做截斷，以確保 recall 估計的統計穩定性。
-
-\paragraph{DiskANN / PaceANN 索引設定}
+DiskANN 與 PaceANN 的 Vamana 索引以表~\ref{tab:index-build} 的參數建構。
 
 \begin{table}[h]
 \centering
@@ -114,24 +99,11 @@ Medoid 數量 $K$ & 5 & 多入口點數（分片均等預算） \\
 \end{tabular}
 \end{table}
 
-$R = 96$ 的設定在圖密度與索引大小之間取平衡：
-$R = 128$ 雖可提供更豐富的連接，但 sector 大小固定，
-更高的 $R$ 意味著更多 sector 讀取，反而可能降低 I/O 效率。
+$R=96$ 是在圖密度與索引大小之間取平衡：$R=128$ 雖然連接更豐富，但 sector 大小固定，$R$ 越大代表每次要讀的 sector 越多，反而可能拖低 I/O 效率。
 
-\paragraph{Starling 索引設定}
-
-Starling 使用相同的圖建構參數（$R = 96$，$L_\text{build} = 120$），
-但額外執行 block shuffling 步驟，
-將相鄰節點打包於同一磁碟頁面（page size = 2）。
-Navigation graph（mem-index）以 $R_\text{mem} = 20$、
-$L_\text{mem} = 128$ 建構，
-涵蓋 0.1\% 的隨機採樣節點。
-
-需要特別說明的是，Starling 的索引格式與 DiskANN \textbf{不相容}：
-兩者不能使用同一個索引檔案，
-因此兩者的 graph quality 在建構細節上仍有微小差異。
-這是現有評估方法論的不可避免限制，
-本研究在呈現比較結果時均明確標記此點。
+Starling 使用相同的圖建構參數（$R=96$、$L_\text{build}=120$），但額外做了 block shuffling，把相鄰節點打包到同一磁碟頁面；
+其 navigation graph（mem-index）以 $R_\text{mem}=20$、$L_\text{mem}=128$ 建構，涵蓋約 0.1\% 的隨機採樣節點。
+要說明的是，Starling 的索引格式與 DiskANN 並不相容，兩者無法共用同一個索引檔，因此圖的建構細節上仍有些微差異；這是現有評估方法的固有限制，我們在呈現比較時都會標明。
 
 %-------------------------------------------------------------
 \section{公平性協定：記憶體預算正規化}
@@ -154,80 +126,29 @@ Starling 恰好用完而 PaceANN 還有餘裕，對 PaceANN 有利；
 若以不同絕對預算分別取最優，
 則兩者資源不等，比較失去意義。
 
-\paragraph{30\% 原始資料大小作為標準預算}
+為了讓四個系統站在同一條起跑線上，本研究以固定的總記憶體預算（涵蓋 PQ 與快取）作為公平基準，各系統都把記憶體用到接近這個上限、但不超過。
+這樣比較的意義，在於它反映的是「相同硬體成本下誰更快」，而不是讓某個系統偷偷多用記憶體去換效能。各系統在該預算下的實際 RSS 需在量測機器上校準後填入（見第~\ref{ch:evaluation}~章）。
 
-本研究採用業界常見的記憶體預算基準：
-\textbf{30\% 原始資料大小}。
-對 SIFT100M（12.8\,GB），標準預算為 $0.3 \times 12.8 = 3.84\,\text{GB}$。
+量測時一律採冷啟動、不做暖機。server 全新啟動後，直接以原始查詢集完整跑一次，不重複、不循環、不預熱，再記錄結果。
+這一點其實很關鍵：PaceANN 的動態快取若以重複查詢預熱，命中率會被人為灌高、I/O 趨近於零，量到的就不是真實流量下的效能。
+因此本研究刻意避免任何 warmup，讓 PaceANN 的快取只透過 BFS 冷啟動種子與正式查詢過程中的 demand-fill 自然累積，這樣的數字才代表實際部署時的表現。
 
-在此預算下：
-\begin{itemize}
-  \item \textbf{DiskANN baseline}：使用固定 1.74\,GB（低於預算，不調整）。
-  \item \textbf{Starling}：固定使用 3.07\,GB（低於 3.84\,GB，在預算內）。
-  \item \textbf{PaceANN}：BNC 設定為 1.65\,GB（總 RSS 約 3.55\,GB，在預算內）。
-\end{itemize}
-
-此配置讓三個系統均在 3.84\,GB 預算內，
-且 PaceANN 與 Starling 的 RSS 相近（3.55\,GB vs. 3.07\,GB）。
-
-\paragraph{暖機協定的對稱性}
-
-兩個系統的快取暖機機制存在本質差異：
-
-\begin{itemize}
-  \item \textbf{PaceANN BNC}：需求驅動，初始命中率為零，
-    必須以代表性查詢集執行 warmup 才能達到穩態。
-    本研究以 10,000 筆 warmup query（L=100）填充 BNC，
-    再執行量測（\textbf{warm BNC} 條件）。
-  \item \textbf{Starling mem-index + partition.bin}：
-    啟動時即完整載入，無需 warmup。
-    其 10,000 筆 warmup 查詢對 Starling 記憶體狀態幾乎無影響，
-    僅用於穩定 OS 的 page cache 與 TLB。
-\end{itemize}
-
-為確保比較的公平性，兩個系統均執行相同數量的 warmup query，
-但需理解 warmup 對兩者的實際效果不同。
-所有論文中呈現的結果均為 warmup 完成後的穩態量測。
-
-\paragraph{執行緒數對稱}
-
-所有對照系統均設定 $T = 16$ worker thread，
-beam width $W$ 依各系統最優設定（
-DiskANN / PaceANN 使用 $W = 8$；
-Starling 使用 $W = 4$，與其原論文設定一致）。
+執行緒方面，所有系統都設 $T = 16$ 個 worker thread，beam width 依各系統的最優設定
+（DiskANN 與 PaceANN 用 $W = 8$，Starling 用 $W = 4$，與其原論文一致）。
 
 %-------------------------------------------------------------
 \section{量測方法論}
 \label{sec:measurement}
 %-------------------------------------------------------------
 
-\paragraph{Server-side 延遲量測}
+延遲數字（平均、P50、P99、P999）都在 server 端計算，時間戳從 worker thread 完整收到查詢封包後開始、到送出結果前結束，
+排除 TCP 建連與網路傳輸，讓延遲只反映搜尋演算法本身的成本。QPS 則在 client 端以牆鐘時間計算，從發出第一筆查詢到收到最後一筆回應，反映端到端的吞吐量。
 
-所有延遲數字（mean、P50、P99、P999）均在 \textbf{server 端}計算，
-時間戳從 worker thread \emph{完整接收查詢封包後}開始，
-到返回結果封包前結束。
-此設計排除了 TCP 連線建立與網路傳輸時間，
-使延遲數字反映搜尋演算法本身的成本，而非網路延遲。
+主要結果以並發度 $C \in \{1, 8, 32\}$ 呈現：$C=1$ 是單客戶端的串列延遲基準，$C=8$ 是中等並發的典型 server 負載，$C=32$ 則是高並發壓力（$C>T$，存在查詢排隊）。
+其中 $C=8$ 是主要的 QPS 比較點，因為此時吞吐量與尾延遲都落在有意義的工作區間。
 
-QPS（每秒查詢數）在 \textbf{client 端}以牆鐘時間計算，
-從發出第一個 query 到收到最後一個 query 回應，
-反映端到端的系統吞吐量。
-
-\paragraph{並發數掃描}
-
-主要結果以並發數 $C \in \{1, 8, 32\}$ 呈現：
-$C = 1$ 代表單一客戶端的串列延遲基準，
-$C = 8$ 代表中等並發的典型 server 負載，
-$C = 32$ 代表高並發壓力測試（$C > T$，存在查詢排隊）。
-$C = 8$ 是主要 QPS 比較指標，因其吞吐量與尾延遲皆處於有意義的工作點。
-
-\paragraph{Search list size $L$ 的角色}
-
-$L$（beam search 的候選列表大小）是控制 recall 的主要旋鈕：
-$L$ 越大，recall 越高，但每次查詢的 hop 數與 I/O 量越多。
-通過掃描 $L$，可以在 recall 軸上生成 QPS-recall Pareto 曲線。
-本研究使用 $L \in \{20, 30, 50, 80, 100, 150, 200, 250, 300\}$ 的掃描範圍，
-覆蓋 recall 約 0.60 到 0.99 的區間。
+搜尋長度 $L$ 是控制 recall 的主要旋鈕：$L$ 越大 recall 越高，但每筆查詢的 hop 數與 I/O 也越多。
+藉由掃描 $L \in \{20, 30, 50, 80, 100, 150, 200, 250, 300\}$，可在 recall 軸上畫出 QPS--recall 的 Pareto 曲線，涵蓋 recall 約 0.60 到 0.99 的區間。
 
 %-------------------------------------------------------------
 \section{消融研究設計}
@@ -257,8 +178,8 @@ $L$ 越大，recall 越高，但每次查詢的 hop 數與 I/O 量越多。
 \begin{itemize}
   \item \texttt{cache\_only} vs. \texttt{baseline}：
     量化動態快取命中率帶來的 I/O 節省。
-  \item \texttt{ET\_only} vs. \texttt{baseline}（cold cache）：
-    在無快取保護下，ET 的 recall 損失（反映假陽性終止的嚴重性）。
+  \item \texttt{ET\_only} vs. \texttt{baseline}（無快取）：
+    在沒有快取保護的情況下，ET 的 recall 損失（反映假陽性終止的嚴重性）。
   \item \texttt{full} vs. \texttt{cache\_only}：
     在快取已覆蓋收斂區的前提下，ET 的額外貢獻。
   \item \texttt{full} vs. \texttt{ET\_only}：
@@ -277,39 +198,21 @@ $L$ 越大，recall 越高，但每次查詢的 hop 數與 I/O 量越多。
 ET 的核心參數 $\theta$ 決定停止條件的保守程度。
 本研究以以下方法論系統化地確定其最優設定範圍：
 
-\paragraph{掃描設計}
+我們固定快取預算，掃描 $\theta \in \{1.05, 1.10, 1.12, 1.20, \infty\}$（$\infty$ 表示停用 ET），對每個 $\theta$ 跑完整的 $L$-sweep（$L \in \{20, 30, 50, \ldots, 300\}$），
+記錄 QPS、Recall@10 與每筆查詢的平均 SSD I/O 數（MeanIOs）。MeanIOs 是關鍵的中間指標：它量化了 ET 實際擋掉多少 SSD 讀取，讓 QPS 的改善能歸因於「更少 I/O」，而不是其他因素。
 
-固定 BNC 容量為 1.65\,GB（warm 條件），
-掃描 $\theta \in \{1.05, 1.10, 1.12, 1.20, \infty\}$（$\infty$ 代表停用 ET），
-對每個 $\theta$ 值執行完整的 $L$-sweep（$L \in \{20, 30, 50, \ldots, 300\}$），
-記錄 QPS、Recall@10 與 \textbf{MeanIOs}（每次查詢的平均 SSD I/O 數）。
-
-MeanIOs 是關鍵的中間指標：
-它量化 ET 實際阻止了多少 SSD 讀取，
-使 QPS 改善的原因可以歸因於「更少 I/O」而非其他因素。
-
-\paragraph{Pareto 最優 $\theta$ 的定義}
-
-對每個 recall 閾值 $r^*$（例如 $r^* = 0.95$），
-定義 Pareto 最優 $\theta$ 為：
+為了避免用更大的 $L$ 去補償激進 $\theta$ 造成的 recall 損失而產生對比偏差，我們對每個 recall 門檻 $r^*$，把 Pareto 最優的 $\theta$ 定義為在滿足 recall $\ge r^*$ 的前提下使 QPS 最大者：
 
 \begin{equation}
   \theta^*(r^*) = \argmax_{\theta} \text{QPS}(\theta, L^*(r^*,\theta))
-  \quad \text{subject to } \text{Recall}(\theta, L^*(r^*,\theta)) \geq r^*
+  \quad \text{s.t. } \text{Recall}(\theta, L^*(r^*,\theta)) \geq r^*
   \label{eq:theta-opt}
 \end{equation}
 
 其中 $L^*(r^*, \theta)$ 是在給定 $\theta$ 下達到 recall $r^*$ 所需的最小 $L$。
-此定義避免了「用更大的 $L$ 補償激進 $\theta$ 造成的 recall 損失」的人為對比偏差。
 
-\paragraph{$\theta$ 與 PQ 壓縮誤差的關係分析}
-
-從理論上，$\theta$ 的容忍帶應與 PQ 的量化誤差分布成正比：
-若 PQ 的距離估計偏差較大，$\theta$ 應設得更保守（更大）；
-偏差較小時，$\theta$ 可以接近 1.0。
-本研究透過比較不同 $\theta$ 下的 recall 下降速率，
-推斷本實驗 NVMe-SIFT100M 設定下的等效 PQ 誤差容忍帶，
-為未來其他資料集的 $\theta$ 選擇提供參考。
+理論上 $\theta$ 的容忍帶應該和 PQ 的量化誤差成正比：PQ 距離估計的偏差越大，$\theta$ 就該設得越保守；偏差小時 $\theta$ 可以接近 1。
+我們藉由比較不同 $\theta$ 下 recall 的下降速率，反推本實驗設定下等效的 PQ 誤差容忍帶，作為未來其他資料集選 $\theta$ 的參考。
 
 %-------------------------------------------------------------
 \section{量測指標定義}
@@ -340,7 +243,7 @@ MeanIOs 是關鍵的中間指標：
   \item[RSS（Resident Set Size）]
     Server process 在量測期間的常駐記憶體大小，
     以 \texttt{/proc/\$PID/status} 的 \texttt{VmRSS} 欄位讀取。
-    用於驗證實際記憶體用量是否在 30\% 預算內。
+    用於驗證實際記憶體用量是否在預算內。
 \end{description}
 
 %-------------------------------------------------------------
@@ -348,10 +251,8 @@ MeanIOs 是關鍵的中間指標：
 \label{sec:reproducibility}
 %-------------------------------------------------------------
 
-為便於結果重現，所有 benchmark 腳本均以 shell script 形式保存，
-包含明確的 server 啟動命令、warmup query 數量、並發數設定與輸出 CSV 格式。
-每次 server 啟動後均等待 35\,秒（PaceANN）或 90\,秒（Starling，需額外載入 BFS cache）
-以確保 index 完整載入後才開始量測。
+為便於重現，所有 benchmark 腳本都以 shell script 保存，包含明確的 server 啟動命令、並發數設定與輸出 CSV 格式。
+每次 server 啟動後會等待數十秒，確保 index 完整載入後才開始量測。
 
 索引建構使用固定隨機種子，確保 Vamana 圖的可重現性。
 Starling 的索引在獨立機器上建構後以 \texttt{rsync} 傳輸，
