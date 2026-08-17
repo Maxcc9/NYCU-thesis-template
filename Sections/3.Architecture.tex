@@ -53,60 +53,28 @@ BFS 種子在這裡只是冷啟動的起點。
 
 如 §\ref{sec:topology} 所述，靜態覆蓋只能保護入口熱區，
 無法涵蓋各查詢專屬、且隨分布漂移的收斂熱區。
-因此 PaceANN 的快取以\textbf{需求驅動的動態快取}為主體
-（BoundedNeighborCache，BNC），在固定記憶體預算內於查詢期間持續演化，
-自動反映實際工作負載的存取模式；
-系統啟動時以 §\ref{sec:topology} 的 BFS-from-medoid 種子預填，消弭冷啟動初期的空窗，
-其後即交由 BNC 的替換策略託管，平滑演化至當前 workload 的分布。
+因此 PaceANN 的快取以需求驅動的動態快取為主體（BoundedNeighborCache，BNC），在固定記憶體預算內於查詢期間持續演化，
+自動反映實際工作負載的存取模式；系統啟動時以 §\ref{sec:topology} 的 BFS-from-medoid 種子預填，消弭冷啟動初期的空窗，
+其後就交由 BNC 的替換策略託管，平滑演化到當前 workload 的分布。
 
-\paragraph{設計約束}
+BNC 的設計同時受四個約束牽制。查找必須支援高並發：16 個 worker thread 會同時讀取，若用全域鎖會造成嚴重的序列化瓶頸。
+插入的頻率相對低：每個節點在首次從 SSD 讀回時插入一次，之後只有被驅逐才需再插入，因此插入路徑可以承擔較高的成本。
+記憶體必須有固定上限，不能因工作負載波動而超出預算。淘汰只需要近似 LRU 的語義，不必付出精確 LRU 維護 doubly-linked list 的代價。
 
-BNC 的設計面臨四個並行存在的約束：
+為滿足這些約束，BNC 以 \texttt{node\_id \% 256} 把節點分到 256 個 shard，每個 shard 各自維護一個 CLOCK 替換環與一把 \texttt{shared\_mutex}。
+高頻的查找走 \texttt{shared\_lock}（允許並發讀者），做一次雜湊表查找並設定 atomic reference bit，約 10--20\,ns；
+分成 256 個 shard 後鎖競爭降到約 $1/256$，16 個 thread 平均每個 shard 只有約 0.06 個並發讀者。
+低頻的插入與驅逐則走 \texttt{unique\_lock}，掃描 CLOCK hand 找到 reference bit 為 false 的 slot 原地替換；由於已持有互斥鎖，不會影響同 shard 的查找。
+相較於精確 LRU，CLOCK 省去了每次查找都要更新 doubly-linked list 的 exclusive lock，在讀遠多於寫的 server 場景下，吞吐量與尾延遲都優於 LRU。
 
-\begin{enumerate}
-  \item \textbf{高並發讀取}：$T = 16$ 個 worker thread 同時查找，
-    全域鎖（global lock）會形成嚴重序列化瓶頸。
-  \item \textbf{低插入頻率}：每個節點首次觸及 SSD 後插入一次，
-    之後只有被驅逐時才需再次插入，插入路徑可以承擔更高的成本。
-  \item \textbf{固定記憶體上限}：需精確控制 DRAM 使用量，
-    不能因為工作負載波動而超出預算。
-  \item \textbf{近似 LRU 語義}：淘汰最不常被近期訪問的節點，
-    但不需要精確 LRU 的 $O(1)$ doubly-linked list 維護。
-\end{enumerate}
-
-\paragraph{分片架構：256 個獨立 CLOCK 環}
-
-BNC 以 \texttt{node\_id \% 256} 將節點分配至 256 個 shard，
-每個 shard 獨立維護一個 CLOCK 替換環與一個 \texttt{shared\_mutex}：
-
-\begin{itemize}
-  \item \textbf{查找（高頻）}：取 \texttt{shared\_lock}（允許並發讀者），
-    雜湊表查找 + atomic reference bit 設定，整體約 10--20\,ns。
-    256 個 shard 使得鎖競爭降低至 $1/256$，
-    16 個 thread 平均每個 shard 的並發讀者只有 $\sim\!0.06$ 個。
-
-  \item \textbf{插入與驅逐（低頻）}：取 \texttt{unique\_lock}（互斥），
-    掃描 CLOCK hand 找到 reference bit 為 false 的 slot，
-    原地替換，成本為 $O(\text{shard capacity} / \text{hit rate})$，
-    不影響同 shard 的查找路徑（因已持有 unique lock）。
-\end{itemize}
-
-相較於精確 LRU，CLOCK 省去了每次查找時更新 doubly-linked list 的
-exclusive lock 操作，在並發讀取遠多於插入的場景下
-（正是 server mode 的典型情況），
-吞吐量與尾延遲均優於 LRU。
-
-\paragraph{座標共存（Coordinate Co-Storage）}
-
-標準 DiskANN 的搜尋流程分為兩個階段：
+除了替換策略，BNC 還做了座標共存（coordinate co-storage）。標準 DiskANN 的搜尋流程分為兩個階段：
 （1）traversal：以 PQ 距離引導的 beam search，只需鄰居 IDs；
 （2）re-rank：取 top-$k$ 候選的完整原始向量，計算精確距離。
 Re-rank 階段需要從 SSD 讀取 $K$ 個節點的完整向量，
 即使 traversal 已全部命中快取，也仍有不可避免的 SSD 存取。
 
-BNC 在快取項目中\textbf{共同儲存節點的原始座標}（raw uint8 coordinates），
-使命中 BNC 的節點在 re-rank 時可直接從 DRAM 讀取精確向量，
-完全消除 re-rank 的 SSD I/O：
+BNC 在快取項目裡一併存下節點的原始座標（raw uint8 coordinates），
+命中 BNC 的節點在 re-rank 時就能直接從 DRAM 取得精確向量，完全省掉 re-rank 的 SSD 讀取：
 
 \begin{center}
 \texttt{struct Entry \{ uint32\_t* neighbors;\ uint8\_t* coords;\ bool ref; \}}
@@ -117,10 +85,8 @@ BNC 在快取項目中\textbf{共同儲存節點的原始座標}（raw uint8 coo
 代價是每個 BNC entry 需要額外儲存 $d_\text{raw}$ bytes 的座標（例如 128 bytes for uint8 SIFT），
 在記憶體預算配置時需一併納入計算。
 
-\paragraph{需求驅動填充與冷啟動}
-
-除了啟動時的 BFS 種子外，BNC 採用\textbf{需求驅動（demand-fill）}策略：
-節點的鄰居列表在首次從 SSD 讀取後才被填入，而非批量預載。
+除了啟動時的 BFS 種子外，BNC 採用需求驅動（demand-fill）的填充方式：
+節點的鄰居列表在首次從 SSD 讀取後才被填入，而不是批量預載。
 如此 BNC 自動反映實際工作負載的存取模式，並隨查詢分布的變化持續適應。
 冷啟動初期的入口空窗由 BFS 種子（§\ref{sec:topology}）填補，
 其餘的收斂熱區則在服務過程中透過 demand-fill 逐步累積、由 CLOCK 替換策略託管；
@@ -134,60 +100,27 @@ BNC 在快取項目中\textbf{共同儲存節點的原始座標}（raw uint8 coo
 早停的核心邏輯在 §\ref{sec:mot-insight} 已引入；
 本節給出正式定義，並說明關鍵設計參數的含義。
 
-\paragraph{停止條件：跨尺度精確門檻}
-
-在 beam search 每次展開前，取 retset 中 PQ 下界最小的未展開候選 $v_\text{best\text{-}unexp}$，
-將其 PQ 下界 $d_\text{PQ}(q, v_\text{best\text{-}unexp})$ 與\emph{已讀回全精度向量}算得的、
-目前第 $2k$ 名候選的\textbf{精確}距離 $d_\text{exact}(q, v_{2k})$ 相比：
+具體來說，在 beam search 每次展開前，我們取 retset 中 PQ 下界最小的未展開候選 $v_\text{best\text{-}unexp}$，
+把它的 PQ 下界 $d_\text{PQ}(q, v_\text{best\text{-}unexp})$，和用已讀回全精度向量算出的第 $2k$ 名候選精確距離 $d_\text{exact}(q, v_{2k})$ 相比：
 
 \begin{equation}
   d_\text{PQ}(q,\, v_\text{best\text{-}unexp}) \;>\; \theta \cdot d_\text{exact}(q,\, v_{2k})
   \label{eq:et-gate}
 \end{equation}
 
-若成立，代表 frontier 中最有希望候選的\emph{樂觀}下界都已劣於現有第 $2k$ 名的\emph{實際}距離，
-繼續展開幾乎不可能改變 top-$k$，即可終止並返回。
-此設計刻意採「跨尺度」比較——待展開端用便宜的 PQ 下界、已收斂端用精確距離——
-並以第 $2k$ 名（而非第 $k$ 名）為門檻，為 recall 預留保守邊界。
-$d_\text{exact}$ 使用 traversal 過程中已讀回的全精度向量（含 BNC co-storage 命中者），
-因此此判斷\emph{不額外觸發任何 SSD I/O}。
+一旦成立，代表 frontier 中最有希望候選的樂觀下界都已經劣於現有第 $2k$ 名的實際距離，再展開下去幾乎不可能改變 top-$k$，於是終止並返回。
+這裡刻意用跨尺度的比較：待展開端用便宜的 PQ 下界、已收斂端用精確距離，並以第 $2k$ 名（而非第 $k$ 名）當門檻，替 recall 多留一點保守邊界。
+$d_\text{exact}$ 用的是 traversal 過程中已經讀回的全精度向量（包含 BNC co-storage 命中的節點），所以整個判斷不會額外觸發任何 SSD 讀取。
 
-\paragraph{$\theta$ 的語義}
+門檻 $\theta$ 控制停止的保守程度。$\theta=1$ 時只要最佳候選的下界等於收斂端邊界就停，完全信任 PQ 近似、最為激進；$\theta\to\infty$ 則永不停止，等同原始 DiskANN；
+實務上取 $\theta$ 約 $1.1$ 到 $1.3$，替 PQ 量化誤差留一點容忍帶，在保守與省 hop 之間取得平衡。
+$\theta$ 的最優值和資料集的 PQ 壓縮誤差分布有關，不同維度與 segment 數的 PQ 設定下略有差異，其敏感性分析放在第~\ref{ch:method}~章。
 
-$\theta$ 控制停止條件的保守程度：
-
-\begin{itemize}
-  \item $\theta = 1.0$：frontier 中最佳候選的 PQ 距離等於 top-$k$ 邊界時即停止，
-    對 PQ 近似完全信任，較為激進。
-  \item $\theta \to \infty$：永不停止，等同原始 DiskANN。
-  \item 典型設定（$\theta \approx 1.1$\textasciitilde$1.3$）：
-    為 PQ 量化誤差預留容忍帶，
-    在保守程度與 hop 節省之間取得平衡。
-\end{itemize}
-
-$\theta$ 的最優值依賴資料集的 PQ 壓縮誤差分布，
-不同 dimension 與 segment 數量的 PQ 設定下，
-$\theta$ 的最優點不同。
-參數敏感性分析在第~\ref{ch:method}~章中呈現。
-
-\paragraph{Patience 與最小 hop 數安全網}
-
-單一 hop 的 PQ 下界可能因量化噪聲短暫越過門檻，
-而搜尋最初期（hop 1\textasciitilde 3）top-$k$ 尚未有足夠候選、$d_\text{exact}(q, v_{2k})$ 亦不穩定，
-兩者都可能造成假陽性終止。系統以兩道安全網防範：
-
-\begin{equation}
-  \text{Stop iff } \big(\text{式}~\eqref{eq:et-gate}\ \text{連續成立 } P \text{ 個 hop}\big)
-  \ \text{AND}\ t \geq t_\text{min}
-  \label{eq:et-guard}
-\end{equation}
-
-其一是 \textbf{patience 計數}：唯有式~\eqref{eq:et-gate} 連續在 $P$ 個 hop 都成立才真正終止
-（典型 $P \approx 6$），過濾單跳噪聲造成的偽觸發。
-其二是\textbf{最小 hop 數} $t_\text{min}$：在前 $t_\text{min}$ 個 hop 內一律不允許 ET，
-確保 top-$k$ 累積到足夠穩定後才開始判斷。
-兩者皆不依賴任何靜態快取層——收斂端的精確距離由 traversal 已讀回、
-並由動態快取 co-storage 保存的全精度向量提供。
+為了避免誤判，我們在停止條件上再加兩道安全網。單一 hop 的 PQ 下界可能因量化噪聲短暫越過門檻，
+而搜尋最初期候選還少、$d_\text{exact}(q, v_{2k})$ 也不穩定，這些都可能造成假陽性終止。
+第一道是 patience 計數：式~\eqref{eq:et-gate} 必須連續在 $P$ 個 hop 都成立才真正終止（典型 $P \approx 6$），藉此濾掉單跳噪聲的偽觸發。
+第二道是最小 hop 數 $t_\text{min}$：前 $t_\text{min}$ 個 hop 內一律不允許早停，確保 top-$k$ 累積到夠穩定後才開始判斷。
+這兩道防護都不依賴任何靜態快取層；收斂端的精確距離來自 traversal 已讀回、並由動態快取的 co-storage 保存的全精度向量。
 
 %-------------------------------------------------------------
 \section{快取與早停的協同必要性}
@@ -198,36 +131,17 @@ $\theta$ 的最優點不同。
 而是一個設計中的相互依賴關係：
 兩者缺少任何一個，另一個都會出現功能性的退化。
 
-\paragraph{情況一：有快取無 ET}
+先看只有快取、沒有早停的情況。若只部署動態快取，beam search 仍按固定 $L$ 跑完整段 hop 序列；
+命中快取的 hop 雖然把 SSD 讀取換成約 10\,ns 的 DRAM 存取、大幅降低 traversal 成本，但 hop 的數量本身並沒有減少。
+如 §\ref{sec:mot-diminishing} 所述，$L=150$ 時約有七成的 hop 在收斂後才執行；有了快取，這些無效 hop 仍會消耗 DRAM 頻寬、shard 鎖與 CPU 的 PQ 計算。
+在高並發下，這些原本被 SSD I/O 掩蓋的競爭，反而會在快取命中率提高後浮現成新的瓶頸。
 
-若只部署動態快取（BNC），
-beam search 仍按固定 $L$ 執行完整的 hop 序列。
-此時所有 hop 的 SSD 讀取被快取命中替換為 DRAM 存取（~10\,ns），
-traversal 成本大幅降低，但\textbf{hop 數本身未減少}。
+反過來，只有早停、沒有快取也不行。少了快取保護前期 hop，搜尋剛起步時 top-$k$ 覆蓋不足，
+用來比較的收斂端距離不穩定，早停就容易假陽性，逼得 $\theta$ 必須設得很保守。
+在無快取的冷啟動下，即使 $\theta=1.2$ 也可能讓 recall 損失超出可接受範圍，只好把 $\theta$ 調到 1.4 以上；
+但這樣一來早停幾乎不觸發，省下的 hop 有限，相較 baseline 幾乎沒有改善。
 
-在 §\ref{sec:mot-diminishing} 的分析中，
-$L = 150$ 時有 70.7\% 的 hop 在收斂後才執行。
-有快取時，這些無效 hop 仍會消耗 DRAM 頻寬、BNC shard 鎖，
-以及 CPU 的 PQ 距離計算資源。
-在高並發下，DRAM 頻寬競爭與鎖競爭會成為新的瓶頸，
-原本被 SSD I/O 掩蓋的競爭現象在快取命中率提高後反而顯現。
-
-\paragraph{情況二：有 ET 無快取（冷啟動）}
-
-若只部署 ET，而沒有快取保護前期 hop，
-系統在搜尋剛起步時（hop 1\textasciitilde 3）的 top-$k$ 覆蓋不足，
-$d_\text{PQ}(q, v_{k\text{th}})$ 不穩定，
-ET 的比值 $r_t$ 容易出現假陽性，迫使 $\theta$ 設定得非常保守。
-
-在無快取的冷啟動條件下，
-即使 $\theta = 1.2$，假陽性率仍可能使 recall 損失超出可接受範圍，
-導致 $\theta$ 必須調大到 $\sim\!1.4$ 以上才能維持目標 recall。
-但此時 ET 的觸發率極低，hop 節省幅度縮水，
-相較於 baseline DiskANN 的改善微乎其微。
-
-\paragraph{協同效應：快取讓 ET 可靠，ET 讓快取的價值充分實現}
-
-兩者協同時：
+兩者一起用時就互補了：
 
 \begin{enumerate}
   \item 動態快取（含 BFS 種子與 demand-fill 累積的熱點）使前期 top-$k$ 以 DRAM 速度快速填充，
@@ -258,25 +172,14 @@ ET 的比值 $r_t$ 容易出現假陽性，迫使 $\theta$ 設定得非常保守
 \label{sec:server}
 %-------------------------------------------------------------
 
-\paragraph{執行緒模型}
+PaceANN server 採用固定執行緒池：$T$ 個 worker thread 各自持有一個 TCP socket 監聽，
+並各有一份 thread-local 的暫存空間（存放 retset、visited bitmap 等 per-query 狀態），避免跨查詢的狀態污染。
+連線被接受後，由空閒的 worker 跑完整段搜尋流程再關閉連線，不需要跨 thread 的工作竊取或 continuation。
 
-PaceANN server 採用固定執行緒池設計：
-$T$ 個 worker thread 各自持有一個 TCP socket 監聽，
-以及一個 thread-local scratch space（用於 retset、visited bitmap 等 per-query 狀態），
-避免跨 query 的狀態污染。
-每個連線被接受後，由空閒 worker 執行完整的搜尋流程後關閉連線，
-無需跨 thread 的工作竊取或 continuation 機制。
+BNC 的 shard 鎖在高並發下的競爭程度，取決於同時執行中的查詢數量。為此 server 維護一個原子計數器 \texttt{\_active\_searches}，
+在進入 \texttt{cached\_beam\_search} 時遞增、返回時遞減，作為動態 I/O 並發控制的負載信號。
 
-\paragraph{在制查詢計數（Active Search Counter）}
-
-BNC 的 shard 鎖在高並發下的競爭程度取決於同時執行中的 query 數量。
-server 維護一個原子計數器 \texttt{\_active\_searches}（\texttt{std::atomic<int32\_t>}），
-在 \texttt{cached\_beam\_search} 進入時遞增、返回後遞減，
-用於為動態 I/O 並發控制提供負載信號（見下段）。
-
-\paragraph{I/O 並發控制（io\_concurrency）}
-
-在高並發時（$C \gg T$，連線排隊），
+利用這個信號，PaceANN 提供一個 I/O 並發控制選項。在高並發時（$C \gg T$，連線排隊），
 所有 $T$ 個 thread 同時執行 beam search，
 每個 hop 最多提交 $W$ 個 SSD 讀取，
 使 $D_\text{eff}$ 在快取未命中時可達 $T \times W$。
@@ -297,13 +200,9 @@ $N$ 為目標最大並發 SSD 讀取數。
 （因多數 hop 命中快取，frontier 中真正需要 SSD 的節點本就不多），
 主要作用是作為快取冷啟動期間的保護機制。
 
-\paragraph{二進位 TCP 通訊協定}
-
-client 透過 TCP 連線傳送固定格式的請求封包，
-包含查詢向量（float 或 uint8）、$K$、$L$、$\theta$ 與 hop\_budget；
-server 返回 top-$K$ 的 node IDs 與精確距離。
-所有計時（mean、P50、P99、P999 latency）在 server 端從\textbf{接收完整請求後}開始計算，
-不含 TCP 建連與傳輸時間，使延遲量測反映搜尋本身的計算成本。
+通訊層採用簡單的二進位 TCP 協定：client 送出固定格式的請求封包（查詢向量、$K$、$L$、$\theta$ 與 hop\_budget），
+server 回傳 top-$K$ 的 node ID 與精確距離。所有計時（平均、P50、P99、P999）都在 server 端從收到完整請求後才開始計算，
+不含 TCP 建連與傳輸時間，讓延遲量測只反映搜尋本身的計算成本。
 
 %-------------------------------------------------------------
 \section{設計摘要}

@@ -58,18 +58,10 @@ DiskANN beam search 的資訊增益並非均勻分布在所有 hop 上。
 後期 hop 的探索空間已高度重疊，
 展開新節點替換 top-$k$ 的概率急遽下降。
 
-\paragraph{量化：Oracle Early Termination 分析}
-
-為精確量化這個現象，
-我們設計 oracle early termination（Oracle ET）分析：
-對 SIFT1M 的每個 query，
-以完整預算（$L = 150$，$W = 8$）執行 beam search，
-同時在每個 hop 結束後擷取當下的 top-$k$ 快照；
-接著以 ground truth 找出「最早達到最終 recall 的 hop」
-作為 oracle 停止點（$h^*$），
-並將 $L/W - h^*$ 定義為\textbf{無效 hop 數}。
-
-結果揭示了一個結構性問題（表~\ref{tab:oracle-summary}）：
+為了量化這個現象，我們做了一個 oracle early termination 分析：對 SIFT1M 的每筆查詢，
+以完整預算（$L=150$，$W=8$）執行 beam search，並在每個 hop 結束後記下當下的 top-$k$；
+再用 ground truth 找出最早達到最終 recall 的那個 hop，當作 oracle 停止點 $h^*$，
+把 $L/W - h^*$ 視為無效 hop 數。結果呈現出一個結構性的問題（表~\ref{tab:oracle-summary}）。
 
 \begin{table}[h]
 \centering
@@ -91,15 +83,13 @@ $L$ & 平均實際 hop & Oracle 停止 hop & 無效 hop\,\% & 延遲節省上限
 
 以高 recall 所需的 $L = 150$ 為例，
 平均每個 query 執行 22.2 個 hop，
-但 oracle 只需 \textbf{6.5 個 hop} 便可達到相同 recall。
+但 oracle 只需 6.5 個 hop 就能達到相同 recall。
 此後的 15.7 個 hop（70.7\%）純粹在收斂後繼續探索，
 不帶來任何 recall 改善，
 卻每個 hop 向 SSD 發出最多 $W = 8$ 個讀取請求。
 
-\paragraph{查詢難度的異質性使問題更加嚴峻}
-
-固定 $L$ 設計的根本缺陷，在於它對異質查詢難度的系統性誤配。
-表~\ref{tab:oracle-cdf} 呈現 oracle 停止點的累積分布：
+固定 $L$ 的設計還有一個更根本的缺陷：它對異質的查詢難度系統性地誤配。
+表~\ref{tab:oracle-cdf} 呈現 oracle 停止點的累積分布。
 
 \begin{table}[h]
 \centering
@@ -118,28 +108,15 @@ $h \leq 11$ & 99.1\% \\
 \end{tabular}
 \end{table}
 
-有 \textbf{64.8\%} 的 query 在第 5 個 hop 即已完成收斂，
-但 $L = 150$ 迫使它們繼續到第 22 個 hop 才停止，
-每個 query 額外執行約 \textbf{17 個無效 hop}。
-這類 query 對應圖中高密度聚集區域的向量，
-答案在圖的局部鄰域中快速可及。
+約 64.8\% 的查詢在第 5 個 hop 就完成收斂，卻被 $L=150$ 逼著跑到第 22 個 hop 才停，
+每筆平均多做約 17 個無效 hop；這些查詢多半落在高密度聚集區，答案在局部鄰域裡很快就找得到。
+另一方面，約 6\% 的查詢需要超過 7 個 hop 才收斂，它們位於資料分布的稀疏邊緣、或多個聚集區的交界，確實需要較大的 $L$ 保護。
+固定 $L$ 的設計於是讓容易的查詢承擔了為困難查詢買保險的成本。
 
-反之，約 6\% 的 query 需要超過 7 個 hop 才收斂，
-代表查詢向量位於資料分布的稀疏邊緣或多個聚集區的交界，
-確實需要大 $L$ 的保護。
-\textbf{固定 $L$ 的設計因此讓容易查詢承擔了為困難查詢保險的成本。}
-
-\paragraph{I/O 邊際效益遞減是普遍規律，非資料集特例}
-
-這個現象並非 SIFT 資料集的特例。
-圖式 ANNS 索引（Vamana、HNSW）在建構時以
-Robust Pruning~\cite{subramanya2019diskann} 確保圖的短路徑性質，
-使 beam search 的前幾個 hop 能夠快速接近 query 的 Voronoi 鄰域。
-一旦進入 Voronoi 鄰域，後續 hop 探索的節點幾乎全部屬於鄰域內部，
-對 top-$k$ 的邊際貢獻趨近於零。
-這一結構性收斂是 Vamana 圖設計的固有特性，
-意味著在任何採用 Vamana 式圖索引的磁碟 ANNS 系統中，
-I/O 邊際效益遞減必然存在。
+這個現象也不是 SIFT 資料集的特例。圖式索引（Vamana、HNSW）在建構時透過 robust pruning~\cite{subramanya2019diskann}
+維持短路徑性質，讓 beam search 前幾個 hop 就能快速接近 query 的 Voronoi 鄰域；
+一旦進入鄰域，後續 hop 探索的多半是鄰域內部的節點，對 top-$k$ 的邊際貢獻趨近於零。
+這種收斂是 Vamana 式圖索引的固有特性，因此在任何採用類似圖結構的磁碟 ANNS 系統上，I/O 的邊際效益遞減都會存在。
 
 %-------------------------------------------------------------
 \section{無效 I/O 在並發 Server 環境的放大機制}
@@ -153,123 +130,43 @@ I/O 邊際效益遞減必然存在。
 而高 $D_\text{eff}$ 使每個 SSD 讀取（包括有效 hop 的讀取）延遲上升，
 進一步惡化尾延遲。
 
-\paragraph{問題鏈條的形式化}
+把這個問題量化一下。若系統有 $T$ 個 worker thread、各服務一個並發查詢，而每筆查詢的無效 hop 比例為 $\rho_w$（$L=150$ 時約 $0.71$），
+那麼在有效佇列深度 $D_\text{eff} = T \cdot W_\text{bw}$ 之中，大約有 $\rho_w$ 比例的請求是可以被消除的浪費。
+以 16 個 thread、beam width 8 估算，128 個並發 I/O 裡約有 91 個來自無效 hop；把它們消掉，有效佇列深度可從 128 降到約 37，
+正好落在 SSD 延遲曲線（圖~\ref{fig:fio-qd}）明顯改善的區間。
 
-設系統有 $T$ 個 worker thread，各自服務一個並發 query。
-每個 query 的無效 hop 比例為 $\rho_w$（如 $L=150$ 時 $\rho_w \approx 0.71$）。
-在穩態下，任意時刻在佇列中的 I/O 請求中，
-有比例 $\rho_w$ 來自無效 hop。
-在有效佇列深度：
+尾延遲（P99/P999）在 server mode 下比平均值更脆弱，這來自兩個交疊的效應。
+一方面，佇列競爭本身帶有隨機性：各 thread 的 hop 並不同步，少數查詢的 SSD 讀取剛好集中在壅塞高峰，等待時間遠超平均，形成長尾。
+另一方面，等待效應會串聯：一筆查詢的有效 hop 若被背景的無效 I/O 拖慢而延後完成，對應的 thread 就無法及時服務後面排隊的查詢，延遲因此往後傳播。
+這兩點讓 P99 對 $D_\text{eff}$ 的敏感度高於平均延遲，在高並發下表現為 P99/mean 比值的急劇上升。
+因此，有效管理 $D_\text{eff}$ 是改善 P99 的必要條件，而不只是一個加速手段。
 
-\begin{equation}
-  D_\text{eff} = T \cdot W_\text{bw}
-  \label{eq:deff-server}
-\end{equation}
-
-中，約有 $T \cdot W_\text{bw} \cdot \rho_w$ 個請求是可被消除的浪費。
-以 $T=16$，$W_\text{bw}=8$，$\rho_w=0.71$ 代入，
-在 128 個並發 I/O 中，\textbf{約 91 個屬於無效 hop}。
-消除這些無效請求，理論上可將有效佇列深度從 128 降至 37，
-對應 SSD 延遲曲線（圖~\ref{fig:fio-qd}）的顯著改善區間。
-
-\paragraph{尾延遲的不對稱放大}
-
-在 server mode 中，尾延遲（P99/P999）比均值更脆弱。
-這源於兩個機制的交叉：
-
-\begin{enumerate}
-  \item \textbf{佇列競爭的隨機性}：
-    各 thread 的 hop 並非完全同步，
-    佇列壅塞時刻對不同 query 的影響取決於其 I/O 請求恰巧落在哪個時間點。
-    少數 query 的 SSD 讀取集中在壅塞高峰，
-    等待時間大幅超過均值，形成長尾。
-
-  \item \textbf{等待效應的串聯}：
-    一個 query 的有效 hop 若被無效 hop 的背景 I/O 拖慢，
-    該 query 的完成時間延後，
-    其對應的 thread 因此無法服務後續的等待 query，
-    延遲向後傳播。
-\end{enumerate}
-
-這兩個機制使得 P99 對 $D_\text{eff}$ 的敏感性高於 mean latency，
-在高並發下表現為 P99/mean 比值的急劇上升。
-\textbf{有效管理 $D_\text{eff}$ 因此是改善 P99 的必要條件，
-而非充分條件。}
-
-\paragraph{現有方法為何無法解決此問題}
-
-Starling~\cite{wang2024starling} 以 page grouping 提升每次 I/O 的資訊密度，
-使較少的 hop 可達到相同 recall；
-這改善的是「每個 hop 的 I/O 效率」，
-但並不偵測或終止收斂後的無效 hop，
-$\rho_w$ 的問題依然存在。
-PipeANN~\cite{osdi25pipeann} 以 pipelined async I/O
-重疊計算與 I/O，隱藏部分延遲，
-但未減少總 I/O 量，在佇列已飽和時效益有限。
-
-上述方法都針對「每個 I/O 的成本」進行優化，
-而\textbf{根本問題是「不必要的 I/O 不應該被發出」}。
+現有方法多半沒有從這個角度切入。Starling~\cite{wang2024starling} 以 page grouping 提升每次 I/O 的資訊密度，讓較少的 hop 就能達到相同 recall，
+但它改善的是每個 hop 的 I/O 效率，並不偵測、也不終止收斂後的無效 hop，$\rho_w$ 的問題依舊存在。
+PipeANN~\cite{osdi25pipeann} 以 pipelined async I/O 重疊計算與 I/O 來隱藏部分延遲，但總 I/O 量沒有減少，佇列一旦飽和效益就有限。
+這些方法都在優化「每個 I/O 的成本」，而真正的問題其實是「不必要的 I/O 根本不該被發出」。
 
 %-------------------------------------------------------------
 \section{核心洞察：收斂可在零 I/O 代價下偵測}
 \label{sec:mot-insight}
 %-------------------------------------------------------------
 
-上述分析的最終出口，取決於能否在搜尋過程中
-\emph{即時}判斷某個 query 的 top-$k$ 是否已收斂——
-且這個判斷必須\textbf{不引入額外的 SSD I/O}，
-否則判斷本身就成為新的 I/O 負擔。
+上述分析的出口，在於能否在搜尋過程中即時判斷某筆查詢的 top-$k$ 是否已收斂，而且這個判斷本身不能再引入額外的 SSD I/O，否則就成了新的負擔。
 
-\paragraph{PQ 距離作為收斂代理信號}
+關鍵在於，判斷收斂所需的資訊其實都已經在 DRAM 裡。DiskANN 在記憶體中保有所有節點的 PQ 壓縮碼，用來在 beam search 中對尚未讀取鄰居的候選快速排序；
+計算一個 PQ 近似距離只是純 CPU 操作，約 10\,ns，比 SSD 讀取的百微秒快了四個數量級。同時，那些已經展開、讀回全精度向量的候選，可以直接算出精確距離。
+於是在每個 hop 之前，我們可以拿 frontier 中最有希望（PQ 下界最小）的未展開候選，去和目前已收斂候選的精確距離相比：
+如果連前者這個樂觀估計都已明顯劣於後者，繼續展開幾乎不可能再換掉任何 top-$k$ 節點，就可以停下。
+整個判斷都在 DRAM 中以 $O(1)$ 的 CPU 操作完成，不讀取任何 SSD 資料。第~\ref{ch:arch}~章會把這個條件正式化為跨尺度的精確門檻。
 
-DiskANN 在 DRAM 中維護所有節點的 PQ 壓縮向量（PQ codes），
-用於在 beam search 中對尚未讀取鄰居列表的候選節點進行快速優先排序。
-計算一個節點的 PQ 近似距離是純 CPU 操作，
-耗時約 10\,ns，與 SSD 讀取的 $\sim\!100\,\mu$s 差距達四個數量級。
+PQ 距離只是近似值，會系統性地低估真實距離（量化誤差）。這代表即使停止條件成立，繼續展開偶爾仍可能改善 recall，
+因此判斷用的門檻 $\theta$ 需要留一點餘裕：$\theta$ 越接近 1 越保守，假陽性少但省下的 hop 也少；$\theta$ 越大越積極，省得多但 recall 代價高。
+如何在不同資料集與 recall 要求下選出合適的 $\theta$，是第~\ref{ch:method}~章要處理的問題之一。
 
-在 beam search 的每個決策時刻，
-retset 中最佳的未展開節點（具有最小 PQ 距離的候選）
-與當前 top-$k$ 中第 $k$ 個節點的距離之比，
-構成一個可量測的收斂代理信號：
-
-\begin{equation}
-  r_t = \frac{d_\text{PQ}(q,\, v_\text{best\_unexp})}{d_\text{PQ}(q,\, v_{k\text{th}})}
-  \label{eq:pq-ratio}
-\end{equation}
-
-當 $r_t$ 顯著大於 1 時，
-frontier 中最佳候選點距 query 的 PQ 估計距離已遠超當前 top-$k$ 中最遠的成員，
-繼續展開幾乎不可能替換任何 top-$k$ 節點。
-這個條件可以在不讀取任何 SSD 資料的前提下，
-在每個 hop 之前以 $O(1)$ 的 CPU 操作完成判斷。
-
-\paragraph{PQ 估計的偏差與可靠性邊界}
-
-PQ 距離是近似值，存在系統性低估的偏差（量化誤差）；
-這意味著即使 $r_t$ 超過閾值，
-實際精確距離仍有概率使展開帶來 recall 改善。
-這個不確定性決定了閾值 $\theta$ 的設計：
-$\theta$ 越保守（接近 1.0），假陽性越少但 hop 浪費越多；
-$\theta$ 越激進，hop 節省越多但 recall 代價越高。
-如何在不同資料集和 recall 要求下選擇合適的 $\theta$，
-是第~\ref{ch:method}~章的核心設計問題之一。
-
-\paragraph{另一個前提：top-$k$ 必須足夠穩定}
-
-PQ 距離比值的判斷有一個必要條件：
-此刻的 top-$k$ candidate list 必須已有足夠覆蓋，
-否則 $d_\text{PQ}(q, v_{k\text{th}})$ 可能因 top-$k$ 尚未收斂而被低估，
-使 $r_t$ 人為偏高，觸發假陽性停止。
-
-這個條件在搜尋初期（hop 1\textasciitilde 3）最難滿足，
-因為此時 beam search 剛從 medoid 出發，
-top-$k$ 只有少數候選，鄰域覆蓋不足。
-\textbf{對高頻訪問節點的快取覆蓋能直接改善這個問題：}
-若前幾個 hop 以 DRAM 速度完成而非以 SSD 速度完成，
-top-$k$ 能在更短的掛鐘時間內建立足夠覆蓋，
-讓後續的 PQ 比值判斷更加可靠。
-這是快取設計與早停機制形成協同關係的根本原因，
-而非兩個獨立優化的偶然組合。
+這個判斷還有一個前提：拿來當基準的已收斂結果必須夠穩定。若此刻 top-$k$ 才剛開始累積、覆蓋不足，
+用來比較的距離就不可靠，容易造成假陽性而提早停止。這種情況在搜尋最初期（前幾個 hop）最難避免，因為 beam search 才剛從 medoid 出發、候選還很少。
+把高頻節點留在快取正好能緩解這點：若前幾個 hop 以 DRAM 而非 SSD 的速度完成，top-$k$ 能在更短的時間內建立足夠覆蓋，
+後續的停止判斷也就更可靠。這也是為什麼快取與早停是彼此需要的協同設計，而不是兩個各自獨立的最佳化剛好湊在一起。
 
 %-------------------------------------------------------------
 \section{研究問題的形式化}
