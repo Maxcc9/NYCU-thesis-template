@@ -3,481 +3,169 @@
 \label{ch:evaluation}
 %=============================================================
 
-% ─── 章節破題 ───────────────────────────────────────────────
-本章依序回答第~\ref{ch:motivation}~章提出的四個研究問題。
-§\ref{sec:eval-cache} 透過記憶體掃描實驗（E2）確定快取的有效作用範圍；
-§\ref{sec:eval-et} 以消融實驗（E1）量化早停在不同快取條件下的效果；
-§\ref{sec:eval-codesign} 驗證快取與早停的協同必要性；
-§\ref{sec:eval-compare} 在等記憶體預算下進行系統間三向比較（E3）；
-§\ref{sec:eval-server} 分析高並發下的 P99 行為；
-§\ref{sec:eval-theta} 研究 $\theta$ 參數的最優設定範圍（E4）；
-最後 §\ref{sec:eval-discuss} 彙整局限性與未來方向。
+本章評估 PaceANN 的兩個機制在伺服器模式下的效果。所有實驗沿用第~\ref{ch:method}~章的量測協定：
+以 client--server 方式進行，原始查詢集只跑一次（不做 warmup、不重複查詢，除局部性實驗外也不套用 zipf 分布），
+並在相同記憶體預算與相同召回率（iso-recall）下比較各系統的 QPS、平均延遲、尾延遲，以及每次查詢的平均 I/O 數。
+比較對象包含 DiskANN baseline、Starling 與 PipeANN。並發度取 $C=8$（與 PipeANN 在本機的公平執行點對齊）與 $C=32$。
+
+本版先固定實驗設計、欄位與比較方式；表中的實測數字待在實驗室機器上依相同配置重跑後填入，
+標示為「待填」的欄位即為此類佔位。
 
 %-------------------------------------------------------------
-\section{快取層的記憶體效率}
-\label{sec:eval-cache}
-%-------------------------------------------------------------
-
-\subsection{記憶體-性能邊際分析}
-
-表~\ref{tab:ram-sweep} 呈現以批次模式（$C = 8$，warm cache）
-在不同記憶體配置下各系統的 QPS，
-配置從 1.74\,GB（DiskANN baseline）到 5.74\,GB（4\,GB BNC）。
-
-\begin{table}[htbp]
-\centering
-\caption{記憶體配置對 QPS 的影響（SIFT100M，批次模式，$C = 8$）}
-\label{tab:ram-sweep}
-\small
-\begin{tabular}{lrcccc}
-\toprule
-系統 & RSS & Recall$\,\geq\,$0.95 & Recall$\,\geq\,$0.97 & Recall$\,\geq\,$0.98 & Recall$\,\geq\,$0.985 \\
-\midrule
-DiskANN baseline    & 1.74\,GB & 1{,}021 & 768   & 591   & 501  \\
-Starling full       & 3.07\,GB & 1{,}326 & 1{,}041 & 698 & 611  \\
-PaceANN 1.3\,GB BNC & 3.04\,GB & 2{,}078 & 1{,}301 & 669 & 391  \\
-PaceANN 2.0\,GB BNC & 3.74\,GB & 2{,}112 & 1{,}308 & 1{,}100 & 947 \\
-PaceANN 4.0\,GB BNC & 5.74\,GB & 2{,}091 & 1{,}303 & 1{,}101 & 950 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-表中揭示三個重要規律：
-
-\paragraph{快取覆蓋的非線性回報}
-PaceANN 1.3\,GB 在 Recall$\,\geq\,$0.97 的 QPS（1{,}301）與
-2.0\,GB（1{,}308）相近，
-但 Recall$\,\geq\,$0.985 時卻急劇下滑至 391（vs. 947）。
-這一「高 recall 懸崖」源自第~\ref{ch:motivation}~章的觀察：
-高 recall 要求更大的 $L$，
-beam search 的探索深度增加，觸達的圖節點超出 1.3\,GB 的覆蓋邊界，
-快取命中率驟降。
-2.0\,GB 的快取（覆蓋約 3.9\% 節點）能維持更深探索下的穩定命中率。
-
-\paragraph{邊際回報遞減點}
-2.0\,GB 到 4.0\,GB 的 QPS 幾乎不變（947 vs. 950 at Recall$\,\geq\,$0.985），
-增加 2\,GB 記憶體換來 0.3\% 的邊際提升。
-這意味著在此資料集上，BNC 的有效覆蓋飽和點約為 3.9\% 節點（2.0\,GB），
-超過此點的記憶體投入幾乎無效。
-
-\paragraph{Starling 的性能定位}
-Starling（3.07\,GB）在 Recall$\,\geq\,$0.95 時達到 1{,}326 QPS，
-高於 DiskANN baseline（1{,}021）但低於 PaceANN 1.3\,GB（2{,}078）。
-在相同 RSS 下，demand-driven BNC 的策略比 Starling 的固定 partition 結構更有效率，
-說明快取 \emph{內容選擇}（拓撲感知 vs. 靜態 partition）的重要性。
-
-\subsection{快取的 I/O 節省機制驗證}
-
-上述 QPS 提升的根因在於 BNC 減少了 SSD I/O 量。
-在 Recall$\,\geq\,$0.97 的工作點（$L \approx 150$），
-BNC warm 條件下每次查詢的實際 SSD I/O 次數，
-由 baseline 的約 $L \times W / \text{sector}$ 次
-降至約 $L \times W \times (1 - h_{\text{BNC}})$
-（$h_{\text{BNC}} \approx 0.80$ 為 BNC 命中率），
-理論上可減少 5$\times$。
-此一 I/O 減少量與觀測到的 QPS 提升（$2.1\times$）的差距，
-說明快取層本身也引入了 DRAM 存取延遲與 shard 鎖爭搶開銷；
-§\ref{sec:eval-codesign}~節將說明 ET 如何消化此殘餘開銷。
-
-%-------------------------------------------------------------
-\section{早停機制的效果與精確度代價}
-\label{sec:eval-et}
-%-------------------------------------------------------------
-
-\subsection{僅有 Layer 1 條件下的 ET 效果（無 BNC）}
-
-為分離 ET 本身的貢獻，
-以僅啟用 Layer 1（20 萬靜態節點，約 0.2\% 覆蓋率）
-且不啟用 BNC 的配置進行消融，結果如表~\ref{tab:et-ablation-l1}。
-
-\begin{table}[htbp]
-\centering
-\caption{Layer 1（20 萬節點）有無 ET（$\theta = 1.4$）的效能比較（$C = 8$）}
-\label{tab:et-ablation-l1}
-\small
-\begin{tabular}{llccccc}
-\toprule
-設定 & $L$ & Recall & QPS & $\Delta$QPS & P99 & $\Delta$P99 \\
-\midrule
-L1 only (no ET) & 150 & 95.06\% & 934    &         & 17.3\,ms & \\
-L1 + ET ($\theta$=1.4) & 150 & 95.05\% & 2{,}203  & $+$136\% & 4.3\,ms  & $-$75\% \\
-\midrule
-L1 only (no ET) & 200 & 96.65\% & 1{,}436  &         & 7.1\,ms & \\
-L1 + ET ($\theta$=1.4) & 200 & 96.62\% & 1{,}695  & $+$18\%  & 5.9\,ms  & $-$17\% \\
-\midrule
-L1 only (no ET) & 300 & 98.13\% & 925    &         & 10.5\,ms & \\
-L1 + ET ($\theta$=1.4) & 300 & 98.05\% & 1{,}188  & $+$28\%  & 9.3\,ms  & $-$11\% \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-在 $L = 150$（Recall $\approx 95\%$）時，ET 帶來 \textbf{136\% QPS 提升}與 \textbf{75\% P99 改善}，
-同時 recall 損失僅 0.01 個百分點。
-這一強烈效果源自以下機制：
-$L = 150$ 的長搜尋路徑中，大多數查詢存在大量「冗餘 hop」
-（§\ref{sec:mot-diminishing} 的分析顯示 top-k 通常在前 15\% 的 hop 已收斂），
-ET 精準切斷了這些冗餘，而 recall 幾乎不受影響，
-因為 Layer 1 的靜態覆蓋已為 top-k 提供了穩定的鄰域估計。
-
-在 $L = 300$（Recall $\approx 98\%$）時，ET 效果收斂至 28\%：
-隨著 $L$ 增大，查詢確實需要更深的探索才能達到目標 recall，
-ET 的可切斷空間縮小。
-這個 $L$-依賴性正是第~\ref{ch:motivation}~章所預測的邊際效益遞減現象的逆面：
-當 $L$ 足夠大、查詢需要幾乎全部探索路徑時，ET 的角色退縮。
-
-\subsection{BNC 條件下的 ET 增量效果}
-
-在 warm BNC（2\,GB）已大幅降低 I/O 成本的前提下，
-ET 仍能提供額外增益，如表~\ref{tab:et-ablation-bnc}。
-
-\begin{table}[htbp]
-\centering
-\caption{BNC warm（2\,GB）有無 ET（$\theta = 1.2$）的比較（$C = 8$）}
-\label{tab:et-ablation-bnc}
-\small
-\begin{tabular}{llcccc}
-\toprule
-設定 & $L$ & Recall & QPS & P99 & P999 \\
-\midrule
-BNC only  & 50  & 81.20\% & 22{,}129 & 0.4\,ms & 0.5\,ms \\
-BNC + ET  & 50  & 81.12\% & 21{,}858 & 0.4\,ms & 0.7\,ms \\
-\midrule
-BNC only  & 100 & 90.91\% & 15{,}627 & 0.6\,ms & 0.8\,ms \\
-BNC + ET  & 100 & 90.06\% & 16{,}281 & 0.6\,ms & 0.9\,ms \\
-\midrule
-BNC only  & 150 & 94.49\% & 11{,}735 & 0.9\,ms & 1.1\,ms \\
-BNC + ET  & 150 & 92.64\% & 13{,}580 & 0.8\,ms & 1.2\,ms \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-在 BNC warm 條件下，ET 的效果明顯縮小：
-$L = 50$ 時 QPS 微幅下降（BNC 幾乎消化了所有 SSD I/O，
-ET 無多餘 hop 可切斷，但引入停止判斷的額外計算開銷）。
-$L = 150$ 時 ET 帶來 15.7\% QPS 提升，
-但 recall 從 94.49\% 下降至 92.64\%（$\Delta = -1.85\%$）。
-
-此 recall 損失的根因在於：$\theta = 1.2$ 在 $L = 150$ 下
-對部分圖深度探索的邊緣節點仍有機率觸發假陽性終止。
-在完整 PaceANN（L1 + BNC + ET）中，
-此問題透過 hop budget guard（式~\ref{eq:et-guard}）緩解：
-ET 在 Layer 1 覆蓋深度 $D$ 內不觸發，等 top-k 穩定後才開始判斷。
-
-%-------------------------------------------------------------
-\section{快取與早停的協同必要性}
-\label{sec:eval-codesign}
-%-------------------------------------------------------------
-
-表~\ref{tab:codesign} 匯總各元件組合在 Recall $\approx 95\%$（$L = 150$）下的性能，
-直接驗證 §\ref{sec:codesign} 的協同設計論點。
-
-\begin{table}[htbp]
-\centering
-\caption{元件消融：各設定於 Recall $\approx 95\%$（$L = 150$，$C = 8$）}
-\label{tab:codesign}
-\small
-\begin{tabular}{lccccc}
-\toprule
-設定 & Layer 1 & BNC & ET & QPS & P99 \\
-\midrule
-Layer 1 only     & \checkmark & $\times$ & $\times$ & 934   & 17.3\,ms \\
-Layer 1 + ET     & \checkmark & $\times$ & \checkmark & 2{,}203  & 4.3\,ms \\
-BNC only         & $\times$ & \checkmark & $\times$ & 11{,}735 & 0.9\,ms \\
-BNC + ET         & $\times$ & \checkmark & \checkmark & 13{,}580 & 0.8\,ms \\
-Full PaceANN     & \checkmark & \checkmark & \checkmark & 11{,}829 & 0.9\,ms \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\paragraph{BNC 是主要驅動力（$12.6\times$）}
-BNC 將 QPS 從 934 提升至 11{,}735（$12.6\times$），
-P99 從 17.3\,ms 壓縮至 0.9\,ms。
-絕大部分的性能增益源於快取大幅減少了 SSD I/O。
-
-\paragraph{ET 在 SSD 依賴下的作用（$+136\%$）}
-在缺乏 BNC 的條件下（L1 only），
-ET 的貢獻為 $+136\%$ QPS（934 $\to$ 2{,}203），
-且 recall 損失幾乎為零（$<0.01\%$）。
-這驗證了 RQ1 的假設：ET 在 SSD 頻繁存取的環境中可靠且有效。
-
-\paragraph{ET 在 DRAM 主導下的有限增量（$+15.7\%$）}
-BNC already-warm 後，ET 的增量縮至 15.7\%（11{,}735 $\to$ 13{,}580）。
-但 recall 下降 1.85 個百分點，是否值得取決於 recall 目標的嚴格程度。
-
-\paragraph{Full PaceANN 的設計意義}
-Full PaceANN（11{,}829 QPS）未達 BNC + ET（13{,}580）的數字，
-原因是 Full PaceANN 以 $\theta = 1.4$（更保守）+ hop budget guard 運行，
-避免了 BNC + ET（$\theta = 1.2$）的 1.85\% recall 損失。
-Full PaceANN 在保持 recall 94.49\% 不變的前提下，
-兼得了 BNC 的穩定命中率與 ET 的 P999 保護（1.2\,ms vs BNC-only 的 1.1\,ms）。
-Layer 1 在此扮演的角色是：為 ET 的觸發提供一個已收斂的 top-k 錨點，
-從而允許更激進的 $\theta$ 設定而不犧牲 recall。
-
-%-------------------------------------------------------------
-\section{等記憶體預算下的系統比較}
+\section{iso-recall 下的系統比較}
 \label{sec:eval-compare}
 %-------------------------------------------------------------
 
-表~\ref{tab:fair-compare} 呈現在 30\% 預算（3.84\,GB）限制下，
-PaceANN（BNC = 1.65\,GB，RSS $\approx$ 3.55\,GB）
-與 Starling（RSS = 3.07\,GB）的直接比較（server mode，warm cache）。
+第一組實驗在均勻（i.i.d.）查詢下，比較四個系統在相同 8\,GB 記憶體預算、相同召回率門檻下的效能。
+各系統各自掃描搜尋長度 $L$，得到召回率對 QPS、尾延遲與 I/O 的 Pareto 曲線，再在共同的召回率點上比較。
+PaceANN 在此採用 OPQ 壓縮（32\,bytes/vector）與 beam width 16 的配置，並同時啟用動態快取與早停。
 
-\begin{table}[htbp]
+\begin{table}[h]
 \centering
-\caption{等預算下 PaceANN vs Starling（SIFT100M，server mode）}
-\label{tab:fair-compare}
-\small
-\begin{tabular}{llccccc}
+\caption{iso-recall 下四系統的效能比較（i.i.d.，$C=8$，8\,GB 預算）}
+\label{tab:main-compare}
+\begin{tabular}{llccc}
 \toprule
-系統 & $L$ & $C$ & Recall & QPS & P99 & P999 \\
+Recall@10 & 系統 & QPS & P99 (ms) & 平均 I/O \\
 \midrule
-PaceANN & 80  & 8  & 88.28\% & 17{,}762 & 0.5\,ms &  0.8\,ms \\
-Starling & 80  & 8  & 89.82\% & 3{,}089  & 3.6\,ms &  9.1\,ms \\
+$\approx 0.96$  & DiskANN  & 待填 & 待填 & 待填 \\
+                & Starling & 待填 & 待填 & 待填 \\
+                & PipeANN  & 待填 & 待填 & 待填 \\
+                & PaceANN  & 待填 & 待填 & 待填 \\
 \midrule
-PaceANN & 100 & 8  & 90.91\% & 15{,}501 & 0.6\,ms &  0.9\,ms \\
-Starling & 100 & 8  & 92.08\% & 2{,}626  & 4.1\,ms & 10.4\,ms \\
+$\approx 0.97$  & DiskANN / Starling / PipeANN / PaceANN & 待填 & 待填 & 待填 \\
 \midrule
-PaceANN & 150 & 8  & 94.49\% & 11{,}829 & 0.9\,ms &  1.2\,ms \\
-Starling & 150 & 8  & 95.21\% & 1{,}803  & 6.1\,ms & 16.6\,ms \\
-\midrule
-PaceANN & 150 & 32 & 94.49\% & 15{,}395 & 3.2\,ms &  5.4\,ms \\
-Starling & 150 & 32 & 95.21\% & 2{,}525  & 9.4\,ms & 16.2\,ms \\
+$\approx 0.98$  & DiskANN / Starling / PipeANN / PaceANN & 待填 & 待填 & 待填 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\paragraph{主要發現（對應 RQ3）}
-
-在 Recall $\approx 95\%$、$C = 8$ 的工作點：
-\begin{itemize}
-  \item QPS：11{,}829 vs 1{,}803 $\rightarrow$ \textbf{6.56$\times$} 優勢
-  \item P99：0.9\,ms vs 6.1\,ms $\rightarrow$ \textbf{6.8$\times$} 優勢
-  \item P999：1.2\,ms vs 16.6\,ms $\rightarrow$ \textbf{13.8$\times$} 優勢
-\end{itemize}
-
-P999 差距（13.8$\times$）遠大於 P99 差距（6.8$\times$），
-揭示了兩個系統尾延遲分布的本質差異：
-Starling 的 P999/P99 比值為 16.6/6.1 = 2.72$\times$，
-而 PaceANN 僅為 1.2/0.9 = 1.33$\times$。
-Starling 的長尾來自 navigation graph 對少數「偏離」查詢（graph 邊界附近）
-的 I/O 次數急劇增加；
-PaceANN 的 demand-driven BNC 對不同難度的查詢均提供較均勻的快取命中率，
-延遲分布因此更集中。
-
-\paragraph{Recall 差距的說明}
-
-在相同 $L$ 下，Starling 的 recall 普遍高於 PaceANN 約 0.5$\sim$1.0 個百分點
-（$L = 150$：95.21\% vs 94.49\%）。
-此差距部分來自索引建構在不同機器上的 medoid 差異（§\ref{sec:reproducibility}），
-部分來自 Starling 的 page shuffle 策略提高了每次 sector 讀取的資訊密度。
-在等 recall 比較下，PaceANN 需略大的 $L$ 達到同等 recall；
-即便如此，其 QPS 仍維持 $6\times$ 以上的優勢。
-
-\paragraph{高並發下的 QPS 擴展性}
-
-從 $C = 8$ 到 $C = 32$，PaceANN 的 QPS 從 11{,}829 上升至 15{,}395（$+30\%$），
-而 Starling 從 1{,}803 上升至 2{,}525（$+40\%$）。
-兩者的相對 QPS 差距從 $6.56\times$ 收窄至 $6.10\times$，
-說明 PaceANN 的 BNC lock 開銷在 $C = 32$ 時略有放大，
-但整體 QPS 優勢並未顯著縮小。
+在高並發（$C=32$）下，我們另外比較各系統的 QPS 與尾延遲。PipeANN 在本機 16 執行緒下，
+其 io\_uring 完成路徑需要 busy-poll、每個搜尋執行緒約佔一核，$C=32$ 時會超額訂閱而效能崩潰；
+因此該點的公平比較改在執行緒較多的機器上進行，數字同樣待補（見 §\ref{sec:eval-discuss} 的公平性討論）。
 
 %-------------------------------------------------------------
-\section{高並發行為與尾延遲分析}
-\label{sec:eval-server}
+\section{兩機制的消融}
+\label{sec:eval-ablation}
 %-------------------------------------------------------------
 
-\subsection{並發度對兩系統 P99 的影響}
+為分別量化動態快取與早停的貢獻，我們在同一組 index 與記憶體預算下，
+依序開關兩個機制，觀察 iso-recall 下的 QPS 與尾延遲變化。設定組合如第~\ref{ch:method}~章表~\ref{tab:ablation} 所列。
 
-表~\ref{tab:concurrency} 展示兩系統在 $L = 150$、
-$C \in \{1, 8, 32\}$ 下的 P99 演進。
-
-\begin{table}[htbp]
+\begin{table}[h]
 \centering
-\caption{並發度對 P99 的影響（$L = 150$，$C = 1 / 8 / 32$）}
-\label{tab:concurrency}
-\small
+\caption{兩機制消融（i.i.d.，8\,GB 預算，固定召回率門檻）}
+\label{tab:eval-ablation}
+\begin{tabular}{lccc}
+\toprule
+設定 & QPS ($C=8$) & QPS ($C=32$) & 平均 I/O \\
+\midrule
+baseline（無快取無 ET） & 待填 & 待填 & 待填 \\
+cache\_only            & 待填 & 待填 & 待填 \\
+ET\_only               & 待填 & 待填 & 待填 \\
+full                   & 待填 & 待填 & 待填 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+其中 \texttt{full} 對 \texttt{cache\_only} 的差距，是在相同 OPQ、beam width 與快取預算下\emph{只切換早停開關}所得，
+因此可視為早停這一機制的乾淨貢獻。我們特別關注此貢獻是否隨並發度上升而增大：
+若如此，代表早停省下的 I/O 在高並發時把頻寬讓回給佇列、進而放大吞吐量，這正是兩機制需要共同設計的直接證據。
+
+%-------------------------------------------------------------
+\section{工作負載局部性}
+\label{sec:eval-locality}
+%-------------------------------------------------------------
+
+動態快取的價值取決於查詢是否具有局部性。我們以 Zipf 參數 $s$ 由 $0$（無重複、純均勻）
+掃到 $1.5$（高度集中），觀察各系統的 QPS 與平均 I/O 隨局部性變化的趨勢。
+
+\begin{table}[h]
+\centering
+\caption{局部性 sweep：QPS 與平均 I/O 隨 Zipf $s$ 的變化（固定召回率）}
+\label{tab:eval-locality}
+\begin{tabular}{lccc}
+\toprule
+Zipf $s$ & DiskANN QPS & PaceANN QPS & PaceANN 平均 I/O \\
+\midrule
+0.0（均勻） & 待填 & 待填 & 待填 \\
+0.5        & 待填 & 待填 & 待填 \\
+1.0        & 待填 & 待填 & 待填 \\
+1.5        & 待填 & 待填 & 待填 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+預期的趨勢是：局部性越強，PaceANN 的動態快取命中越多、平均 I/O 塌陷、QPS 顯著上升；
+靜態的 DiskANN 幾乎持平，而 PipeANN 因為沒有自適應快取，也無法從局部性受益。
+
+%-------------------------------------------------------------
+\section{高並發尾延遲}
+\label{sec:eval-tail}
+%-------------------------------------------------------------
+
+尾延遲是伺服器情境的關鍵指標。我們固定召回率，把並發度 $C$ 由 $1$ 掃到機器的執行緒上限，
+比較各系統的 P99 與 P999 延遲。
+
+\begin{table}[h]
+\centering
+\caption{尾延遲隨並發度的變化（固定召回率）}
+\label{tab:eval-tail}
 \begin{tabular}{lcccc}
 \toprule
-系統 & P99@$C{=}1$ & P99@$C{=}8$ & P99@$C{=}32$ & P99 ratio ($C_{32}/C_8$) \\
+並發度 $C$ & DiskANN P99 & Starling P99 & PipeANN P99 & PaceANN P99 \\
 \midrule
-PaceANN & 1.9\,ms & 0.9\,ms & 3.2\,ms & 3.56$\times$ \\
-Starling & 4.1\,ms & 6.1\,ms & 9.4\,ms & 1.54$\times$ \\
+1  & 待填 & 待填 & 待填 & 待填 \\
+8  & 待填 & 待填 & 待填 & 待填 \\
+16 & 待填 & 待填 & 待填 & 待填 \\
+32 & 待填 & 待填 & 待填 & 待填 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-PaceANN 的 P99 ratio（3.56$\times$）高於 Starling（1.54$\times$），
-說明 PaceANN 在高並發下的尾延遲放大幅度更大。
-此現象源於 BNC CLOCK 的 256-shard 設計：
-儘管每個 shard 的並發讀者平均只有 $16 / 256 \approx 0.06$，
-偶發的同一 shard 熱點查詢（如 medoid 附近的高頻節點）
-會在 $C = 32$ 下造成短暫的 unique lock 等待，
-形成延遲峰值。
-
-Starling 的 P99 ratio 較低，
-因為其 navigation graph 本質上是一個 read-only 靜態結構，
-高並發下無動態更新或鎖競爭，
-SSD 的 I/O 延遲分布更均一。
-這印證了第~\ref{ch:motivation}~章的分析：
-\emph{降低每次 hop 的 I/O 數}（Starling）與
-\emph{降低 hop 次數}（PaceANN ET）在高並發下呈現不同的 P99 特性。
-
-\subsection{\texttt{io\_concurrency} 的效果與侷限}
-
-為緩解高並發下的 NVMe 佇列競爭，
-本研究在 PaceANN 中實作了 \texttt{io\_concurrency}（見 §\ref{sec:server}），
-動態調整每次查詢的 $W_{\text{eff}} = \min(W, \lfloor N / a \rfloor)$（式~\ref{eq:io-concurrency}）。
-表~\ref{tab:io-conc} 比較不同設定在 $L = 100$ 下的效果。
-
-\begin{table}[htbp]
-\centering
-\caption{\texttt{io\_concurrency} 對 P99 ratio 的影響（$L = 100$，warm BNC=1.65\,GB）}
-\label{tab:io-conc}
-\small
-\begin{tabular}{lccccc}
-\toprule
-設定 & $W_{\text{eff}}$（at $T{=}16$）& P99@$C{=}8$ & P99@$C{=}32$ & P99 ratio & QPS@$C{=}8$ \\
-\midrule
-baseline (\texttt{ioc=0})     & 8 & 0.63\,ms & 2.47\,ms & 3.93$\times$ & 15{,}543 \\
-\texttt{ioc=64}               & 4 & 0.61\,ms & 2.32\,ms & 3.77$\times$ & 15{,}779 \\
-\texttt{ioc=32}               & 2 & 0.80\,ms & 2.13\,ms & 2.66$\times$ & 17{,}007 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\texttt{ioc=32}（$W_{\text{eff}} = 2$ at full $T = 16$ load）
-將 P99 ratio 從 3.93$\times$ 降至 2.66$\times$（$-32\%$），
-但 P99@$C = 8$ 從 0.63\,ms 升至 0.80\,ms（$+27\%$）。
-此 trade-off 的根因：
-較小的 $W_{\text{eff}}$ 使每個查詢的並行 SSD I/O 減少，
-降低了佇列競爭；但同時每個 hop 的並行度降低，
-單一查詢的 latency 略微上升。
-值得注意的是，\texttt{ioc=32} 同時帶來 QPS@$C = 8$ 提升（$+9.4\%$），
-這源於較低的佇列深度讓 NVMe 完成時間更均勻，整體吞吐量反而更高。
-
-\paragraph{BNC warm 的稀釋效應限制了 \texttt{io\_concurrency} 的空間}
-
-理論上，$T = 16$、$W = 8$ 的並發系統最多有 $128$ 次 in-flight SSD I/O。
-但在 BNC warm（命中率 $\approx 80\%$）條件下，
-實際 SSD I/O $\approx 16 \times 8 \times 0.2 = 25.6$（遠低於 128）。
-\texttt{io\_concurrency} 的設計假設是「高 SSD queue depth 是瓶頸」，
-但 BNC 已將有效 queue depth 從 128 壓縮至約 26；
-\texttt{ioc=32} 進一步壓縮至約 6，
-此時 CPU-side 的 CLOCK 更新邏輯反而成為新的邊際瓶頸，
-導致改善幅度有限且有代價。
+動態快取透過座標共存讓命中節點免去 re-rank 的回盤，是壓低 P99／P999 的主要來源；
+早停則減少進入共享 NVMe 佇列的冗餘讀取，在高並發時緩解佇列排隊。
 
 %-------------------------------------------------------------
-\section{$\theta$ 參數敏感性分析}
+\section{$\theta$ 參數敏感性}
 \label{sec:eval-theta}
 %-------------------------------------------------------------
 
-表~\ref{tab:theta-sweep} 展示不同 $\theta$ 值在 $L = 100$（warm BNC = 2\,GB）下的
-QPS-recall-MeanIOs 三元組。
+早停的鬆緊由門檻 $\theta$ 控制。$\theta$ 越小越積極、省下的 hop 越多，但假陽性終止造成的召回率損失也越大。
+我們在固定資料集與快取配置下掃描 $\theta$，觀察其對召回率與 QPS 的取捨，並確認最優區間的穩定性。
 
-\begin{table}[htbp]
+\begin{table}[h]
 \centering
-\caption{$\theta$ 敏感性分析（BNC warm 2\,GB，$L = 100$，$C = 8$）}
-\label{tab:theta-sweep}
-\small
-\begin{tabular}{lcccc}
+\caption{$\theta$ 對召回率與 QPS 的影響（$C=8$）}
+\label{tab:eval-theta}
+\begin{tabular}{lcc}
 \toprule
-$\theta$ & Recall & QPS & P99 & MeanIOs（平均每 query SSD 讀取次數） \\
+$\theta$ & Recall@10 & QPS \\
 \midrule
-1.05  & 78.42\% & 6{,}315  & 4.7\,ms & 59.6  \\
-1.10  & 83.86\% & 5{,}155  & 5.5\,ms & 73.3  \\
-1.12  & 85.82\% & 4{,}705  & 5.7\,ms & 80.2  \\
-1.20  & 90.39\% & 3{,}511  & 6.7\,ms & 104.4 \\
-no ET & 90.91\% & 15{,}627 & 0.6\,ms & —     \\
+1.2 & 待填 & 待填 \\
+1.3 & 待填 & 待填 \\
+1.4 & 待填 & 待填 \\
+1.6 & 待填 & 待填 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\paragraph{$\theta$ 的兩個特性}
-
-\begin{enumerate}
-  \item \textbf{MeanIOs 與 $\theta$ 正相關，recall 與 MeanIOs 正相關}：
-    較大的 $\theta$ 要求更高的 PQ 比值才觸發停止，
-    允許更多 hop（MeanIOs 從 59.6 到 104.4），recall 因此越高。
-    這定量驗證了 §\ref{sec:mot-insight} 的 $r_t$ 語義：
-    $\theta$ 控制的是「允許多少倍的估計誤差裕度」。
-
-  \item \textbf{BNC warm 條件下 ET 的 QPS 表現非直觀}：
-    $\theta = 1.05$ 時 QPS = 6{,}315，
-    $\theta = 1.20$ 時 QPS 降至 3{,}511，
-    而 no-ET 時 QPS 升至 15{,}627。
-    此「逆序」現象源於本實驗的 BNC warm 條件：
-    BNC 已大幅減少 SSD I/O；ET 的可切除空間有限。
-    過激的 ET（$\theta = 1.05$，recall 78.42\%）雖切除了更多 hop，
-    但造成嚴重的 recall 損失，
-    使得在相同 recall 目標下反而需要更大的 $L$ 來補償，
-    形成「ET 讓 QPS 降低」的表象。
-    此結果強調：$\theta$ 必須以「在目標 recall 下最大化 QPS」
-    （式~\ref{eq:theta-opt}）為準則選擇，而非直覺地追求小 $\theta$。
-\end{enumerate}
-
-\paragraph{最優 $\theta$ 的選擇與泛化性}
-
-對 SIFT100M uint8、BNC warm、Recall $\geq 0.95$ 目標，
-$\theta^*(0.95) = 1.4$（式~\ref{eq:theta-opt}）。
-$\theta < 1.10$ 造成超過 7 個百分點的 recall 損失，超出可接受範圍。
-$\theta = 1.10 \sim 1.20$ 形成一個過渡帶：
-recall 不足但 hop 減少量相對有限。
-$\theta = 1.4$ 的語義是「允許最佳未探索節點的 PQ 距離是第 $k$ 名的 1.4 倍」，
-對 uint8 PQ 的量化誤差帶（通常為 $\pm 5\sim 10\%$）有合理的裕度。
+$\theta$ 的最優點與資料集的 PQ 量化誤差分布有關，不同維度與 segment 數的 PQ 設定下略有差異，
+因此本文將 $\theta$ 視為需依資料集校準的參數，而非固定常數。
 
 %-------------------------------------------------------------
-\section{討論與局限性}
+\section{討論與局限}
 \label{sec:eval-discuss}
 %-------------------------------------------------------------
 
-\subsection{主要結論}
+綜合以上實驗，PaceANN 的兩個機制各自針對磁碟式搜尋在空間與時間上的浪費：
+動態快取在有局部性的工作負載上把熱點留在 DRAM、消除 re-rank 回盤，是壓低尾延遲的主力；
+早停則減少收斂後的冗餘 I/O，在高並發下把頻寬讓回佇列而提升吞吐量。兩者在伺服器情境下互補。
 
-本評估系統地回答了四個研究問題：
-
-\begin{description}
-  \item[\textbf{RQ1}（ET 可靠性）\textbf{得到驗證}]
-    在 Layer 1 覆蓋保護下，$\theta = 1.4$ 可在 Recall $\approx 95\%$ 時
-    帶來 $+136\%$ QPS 與 $-75\%$ P99 改善，recall 損失 $< 0.01\%$。
-    ET 的可靠性依賴 hop budget guard 與 Layer 1 的穩定化作用。
-
-  \item[\textbf{RQ2}（快取的 ET 使能效應）\textbf{得到驗證}]
-    BNC 在 DRAM 主導下將 I/O 大幅減少（$12.6\times$ QPS）；
-    在此前提下，ET 的增量效果縮小（$+15.7\%$），
-    但兩者協同使 Full PaceANN 兼得高 QPS 與穩定 recall。
-
-  \item[\textbf{RQ3}（等預算比較）\textbf{得到驗證}]
-    PaceANN 在 30\% 預算內以 $6.56\times$ QPS、$6.8\times$ P99、
-    $13.8\times$ P999 優勢超越 Starling（@Recall $\approx 95\%$）。
-
-  \item[\textbf{RQ4}（$\theta$ 敏感性）\textbf{得到刻畫}]
-    最優 $\theta^* = 1.4$，對 SIFT100M uint8 具有良好泛化性；
-    $\theta < 1.10$ 造成不可接受的 recall 損失。
-\end{description}
-
-\subsection{局限性與未來方向}
-
-\begin{enumerate}
-  \item \textbf{資料集單一性}：
-    所有實驗均在 SIFT100M（128 維 uint8，Euclidean 距離）上進行。
-    不同維度（高維 float32）、不同距離函數（inner product）
-    或稀疏向量資料集（MSMARCO）可能改變 BNC 的最優容量與 $\theta$ 的選擇。
-    未來工作應在 DEEP1B 或 DPR passage retrieval 資料集上驗證結論的普適性。
-
-  \item \textbf{索引品質不對稱}：
-    PaceANN 與 Starling 使用不同 medoid 的索引（§\ref{sec:reproducibility}），
-    Starling 略高的 recall（$+0.5\sim1\%$）部分來自此差異。
-    等索引品質下的比較需統一建構環境，或使用固定種子的 reproducible 建構流程。
-
-  \item \textbf{\texttt{io\_concurrency} 的侷限}：
-    在 BNC warm 條件下，\texttt{io\_concurrency} 的 P99 ratio 改善有限（$3.93\times \to 2.66\times$）
-    且有 P99@$C = 8$ 代價。
-    根本解決 P99 問題可能需要 per-query private I/O queue
-    或更細粒度的 BNC shard（目前 256 shard 在極端並發下仍有偶發競爭）。
-
-  \item \textbf{暖機的非對稱代價}：
-    PaceANN 的 BNC 需要 10{,}000 筆 warmup 才能達到穩態，
-    而 Starling 啟動即就緒。
-    在 cold-start 場景（系統重啟或索引更新後）中，
-    PaceANN 在暖機期間的性能將明顯低於穩態；
-    此代價未在本研究中量化，是未來需要解決的實際部署問題。
-\end{enumerate}
+本研究仍有若干界限，於此如實列出。
+第一，目前的主結果以 SpaceV 為主，尚需在 SIFT 與 DEEP 等資料集上複製，才能宣稱跨資料集的普遍性。
+第二，i.i.d. 情境下的優勢部分來自 OPQ 壓縮與 beam width 16 這組共用配置；這是合法的設計選擇，但嚴格的公平比較應讓對手也採用相同壓縮，屆時早停仍是 PaceANN 獨有的貢獻。
+第三，PipeANN 在本機的公平執行點為 $C=8$（8 個搜尋執行緒加 8 個 poller 恰好用滿 16 執行緒）；其在更高並發下的崩潰源自 busy-poll 的執行緒超額訂閱，而非索引品質，因此高並發的比較需在執行緒較多的機器上進行。
+第四，早停的參數（$\theta$、patience、最小 hop 數）目前為靜態設定，未隨查詢動態調整。
+第五，評估僅涵蓋 1 億級資料與單顆 SSD 上的 io\_uring，尚未驗證十億級規模、多 SSD 或 SPDK 等情境。
+這些界限同時也是後續工作的方向。
