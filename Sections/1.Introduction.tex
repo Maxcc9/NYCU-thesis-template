@@ -20,17 +20,17 @@ Starling 則嘗試從 page layout 的角度改善這個問題。
 本研究提出 PaceANN，核心目標是讓 DiskANN 在不重建索引布局的前提下，
 以更低的磁碟讀取數和更早的無效展開停止條件，改善實務查詢效率。
 PaceANN 的設計重點有兩個機制。
-第一，它在原本的 DiskANN 搜尋路徑上加入一層\textbf{並發感知的動態快取}：
+第一，它在原本的 DiskANN 搜尋路徑上加入一層\textbf{熱門度自適應快取管理器}（Popularity-Adaptive Cache Manager, PAC）：
 以分片式 CLOCK 結構在查詢期間依實際存取熱點演化，並在快取項目中與鄰居列表共存全精度向量；
 快取未命中時直接退回原本的磁碟讀取路徑，搜尋語義不變。
-第二，它在 beam search 中加入 per-query 的\textbf{收斂感知早停（ET）}，
+第二，它在 beam search 中加入 per-query 的\textbf{收斂感知早停}（Convergence-Aware Early Termination, CA-ET），
 以已收斂候選的精確距離判斷是否可停，使 easy query 更早停下、hard query 繼續展開，
 避免所有查詢都被同一個固定預算綁住\cite{li2020adaptiveet,chatzakis2025darth,teofili2025patience}.
 
 本論文的主要貢獻如下：
 \begin{itemize}
-  \item 提出並發感知的動態快取（BNC）：分片 CLOCK 加座標共存，在高並發下以低鎖競爭將熱點鄰居維持於 DRAM，並消除 re-rank 的 SSD I/O。
-  \item 設計 per-query 的收斂感知早停（ET）：以跨尺度精確門檻（PQ 下界對比第 $2k$ 名的精確距離）加 patience 計數，讓查詢依收斂狀態提前停止，且不額外觸發任何 I/O。
-  \item 論證動態快取與 ET 的協同必要性，並在 server mode、iso-recall 與等記憶體預算下完成評估。% TODO(定稿數字)：填入去污染後對 DiskANN／Starling／PipeANN 的具體結果
+  \item 提出熱門度自適應快取管理器（PAC）：分片 CLOCK 加座標共存，在高並發下以低鎖競爭將熱點鄰居維持於 DRAM，並消除 re-rank 的 SSD I/O。
+  \item 設計 per-query 的收斂感知早停（CA-ET）：以跨尺度精確門檻（PQ 下界對比第 $2k$ 名的精確距離）加 patience 計數，讓查詢依收斂狀態提前停止，且不額外觸發任何 I/O。
+  \item 論證 PAC 與 CA-ET 的協同必要性，並在 server mode、iso-recall 與等記憶體預算下完成評估。% TODO(定稿數字)：填入去污染後對 DiskANN／Starling／PipeANN 的具體結果
   \item 分析記憶體與並發下的行為，說明兩個機制的協同效果，以及高並發下 shard contention 的界限。
 \end{itemize}

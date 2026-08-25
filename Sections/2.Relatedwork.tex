@@ -11,7 +11,7 @@ DiskANN 以 Vamana 圖搭配 PQ 壓縮碼突破此限制：壓縮向量留在記
 
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=0.9\textwidth]{img/diskann_layout.png}
+  \includegraphics[width=0.9\textwidth]{img/diskann_layout.pdf}
   \caption{DiskANN 的磁碟索引佈局。每個節點是一筆定長記錄
   （全精度向量、鄰居數、定長鄰居 ID 列表，不足補零），多筆節點打包進固定大小的 sector，
   節點 ID 由位置隱含決定。因此每個 beam search hop 對應一次 4\,KB 隨機讀取，
@@ -26,7 +26,3 @@ DiskANN 以 Vamana 圖搭配 PQ 壓縮碼突破此限制：壓縮向量留在記
 \section{Early Termination for ANN Search}
 
 固定搜尋預算對難易查詢一視同仁，在 easy query 上浪費 hops、在 hard query 上損及 recall。針對此已有多種 query-adaptive 早停：以學習模型預測終止點\cite{li2020adaptiveet}、以宣告式 recall 目標驅動停止\cite{chatzakis2025darth}、以 top-$k$ 結果穩定性為判據\cite{teofili2025patience}、以距離自適應調整 beam 寬並給出正確性保證\cite{aljazzazi2025dabs}，或依查詢分布調整探索策略\cite{zhang2025distributionaware}. 這些方法多在記憶體內索引（如 HNSW）上驗證，其終止判斷未與磁碟式系統的 I/O 路徑與快取共同設計，因此難以直接把「少發 I/O」轉化為 serving 下的吞吐與尾延遲改善。
-
-\section{Positioning of PaceANN}
-
-PaceANN 不重建索引布局，也不取代圖式或 page-based 方法，而是在保留 DiskANN 索引語義的前提下，直接針對「高並發下冗餘 I/O 灌入共享 SSD 佇列」這個 serving 瓶頸。與 Starling 相比，它不依賴新的靜態 page layout，改以隨工作負載演化的動態快取涵蓋各查詢專屬、且隨分布漂移的收斂熱區；與既有早停相比，它把 frontier 與 top-$k$ 的跨尺度比較嵌入 DiskANN 的 beam search 主迴圈，並與快取共同設計，使收斂端的終止信號可靠。這種設計使 PaceANN 特別適合高 recall、需 server 端並發處理、且資料頻繁更新的部署情境。

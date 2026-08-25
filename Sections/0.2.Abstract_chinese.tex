@@ -30,9 +30,9 @@
 徒增無效 SSD I/O 並拉長其他查詢的佇列等待；兩者共同惡化尾延遲與吞吐量。
 為此，我們提出 PaceANN——一套無須重建索引、可直接套用於既有 DiskANN 索引的磁碟式加速方案，
 在 DRAM 與 SSD 的分層儲存上引入兩個相互協同的機制。
-其一，自適應快取（adaptive cache）以分片式 CLOCK（sharded CLOCK）在查詢期間依熱點
+其一，熱門度自適應快取管理器（Popularity-Adaptive Cache Manager, PAC）以分片式 CLOCK（sharded CLOCK）在查詢期間依熱點
 動態累積並更新高頻節點資料，提升快取命中率；
-其二，自適應提前終止（adaptive early termination）依候選與查詢距離的收斂程度，為每筆查詢個別決定停止時機，
+其二，收斂感知早停（Convergence-Aware Early Termination, CA-ET）依候選與查詢距離的收斂程度，為每筆查詢個別決定停止時機，
 讓簡單查詢早停、困難查詢續行，減少無效 SSD I/O 並釋出佇列資源。
 實驗顯示，在高並發伺服器模式（16 用戶端、RSS 8\,GB 上限）下，PaceANN 同時提升吞吐量並改善 P99 尾延遲：
 SPACEV100M 上吞吐量較 DiskANN 提升 ?×、P99 降至 ?×；SIFT100M 上提升 ?×、P99 降至 ?×。

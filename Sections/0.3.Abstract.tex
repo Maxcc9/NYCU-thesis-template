@@ -31,9 +31,9 @@ Second, although an easy query has already converged, beam search keeps expandin
 incurring unnecessary SSD I/O and lengthening the queue wait of other queries; both effects worsen tail latency and throughput.
 To address these, we propose PaceANN, an acceleration scheme for disk-based ANNS that requires no index rebuild and applies directly to existing DiskANN indexes.
 On the DRAM-over-SSD storage hierarchy, PaceANN introduces two co-designed mechanisms.
-The first is an adaptive cache: a sharded CLOCK structure that \emph{dynamically} accumulates and updates the data of frequently visited nodes
+The first is a Popularity-Adaptive Cache Manager (PAC): a sharded CLOCK structure that \emph{dynamically} accumulates and updates the data of frequently visited nodes
 according to the evolving hotspots at query time, raising the cache hit rate.
-The second is adaptive early termination, which decides a per-query stopping point inside the beam-search loop from the convergence between the current candidates and the query,
+The second is Convergence-Aware Early Termination (CA-ET), which decides a per-query stopping point inside the beam-search loop from the convergence between the current candidates and the query,
 so that easy queries stop early while hard queries keep expanding, reducing unnecessary SSD I/O and freeing SSD queue slots.
 In high-concurrency server mode (16 clients, 8\,GB RSS budget), PaceANN improves query throughput while lowering P99 tail latency:
 on SPACEV100M it improves throughput by ?$\times$ over DiskANN and reduces P99 to ?$\times$; on SIFT100M it improves throughput by ?$\times$ and reduces P99 to ?$\times$.
