@@ -1,50 +1,32 @@
 \chapter{Related Work}
 \label{ch:relatedwork}
 
-PaceANN 的設計建立在三條研究脈絡之上：磁碟式 graph ANN、page-based search，以及早停式搜尋控制。
-這些工作共同指出，當資料規模進入百萬到十億級時，搜尋時間不再只由距離計算主導，
-而是受到索引布局、I/O 模式與 query 難度分布共同影響。
-
 \section{Disk-based Graph ANN}
 
-DiskANN 是磁碟式 graph ANN 的代表作之一。
-其核心優勢在於以壓縮碼與圖結構將大量向量索引化，讓系統即使在有限 DRAM 下仍能支援超大規模搜尋\cite{subramanya2019diskann}.
-後續的 SPANN 延伸了這條路線，強調在大規模環境中透過 partition 與近似結構提升實際可部署性\cite{chen2021spann}.
-DiskANN++ 則進一步嘗試針對 query-sensitive search 與 page-based traversals 做優化，
-顯示出「單純依賴圖連結」並不足以完全解決磁碟搜尋成本\cite{ni2023diskannpp}.
+高維向量的近似最近鄰搜尋方法一般依索引結構分為四類：樹狀\cite{muja2014flann}、雜湊\cite{datar2004lsh}、聚類式\cite{chen2021spann} 與圖式\cite{malkov2020hnsw,fu2019nsg}. 樹狀方法在低維有效，但隨維度上升會因維度詛咒而退化；雜湊以機率性方式把相近向量映到同一桶；聚類式將向量分群、以反向索引只在少數群內搜尋；圖式方法則在多項實證中於效率與精度的取捨上最佳，成為高維向量搜尋的主流。乘積量化（PQ\cite{jegou2011pq} 及其優化版 OPQ\cite{ge2013opq}）並非獨立的索引結構，而是可跨類別套用的向量壓縮技術，常用於降低記憶體與計算成本，DiskANN 等磁碟式系統即以其壓縮導航向量。然而記憶體內的圖式索引須同時保存原始向量與圖結構，記憶體開銷高，難以擴展到數億級以上的資料\cite{subramanya2019diskann}.
 
-這些方法的共同限制是：當搜尋路徑需要大量隨機讀取時，效能會迅速受制於 I/O latency。
-即便讀取資料頁的數量不高，若每個 hop 的候選展開仍需回到磁碟，吞吐量便會受到顯著影響。
-PaceANN 的動機正是要在不改變 DiskANN 基本索引語義的前提下，進一步減少這種 traversal I/O。
+DiskANN 以 Vamana 圖搭配 PQ 壓縮碼突破此限制：壓縮向量留在記憶體導航、完整索引置於磁碟，在單機支援十億級搜尋\cite{subramanya2019diskann}，並已落地於實際的向量資料庫與雲端服務\cite{wang2021milvus,upreti2025cosmos}. 沿此圖式磁碟路線，DiskANN++ 以 query-sensitive 入口與 page-based traversal 進一步降低搜尋成本\cite{ni2023diskannpp}. 這些系統共享同一個瓶頸：beam search 的關鍵路徑包含數十次隨機磁碟 I/O，使磁碟式圖索引的查詢延遲遠高於記憶體內索引。針對此瓶頸，PipeANN 以 compute-I/O pipelining 對齊 best-first 搜尋與 SSD 特性，重疊每一步的計算與 I/O，藉此縮短單筆查詢的關鍵路徑延遲\cite{osdi25pipeann}. PipeANN 與本研究處理同一瓶頸的不同面向：它針對\emph{單筆}搜尋的延遲進行排程層級的重疊，而 PaceANN 則在\emph{高並發}下直接減少進入共享佇列的冗餘 I/O 總量；兩者機制正交，也因此 PipeANN 是本研究在 serving 情境下的主要對照系統之一。
+
+此瓶頸的結構直接來自 DiskANN 的磁碟佈局（圖~\ref{fig:diskann-layout}）：每個節點是一筆定長記錄，依序存放全精度向量、鄰居數與定長鄰居 ID 列表，多筆節點打包進固定大小的 sector。因此每展開一個節點即一次 4\,KB 隨機讀取，而末段 re-rank 所需的全精度向量保存於同一記錄中；查詢成本因而由「展開幾個節點」與「其中幾個須回盤」共同決定——這也是 PaceANN 兩個機制各自針對的目標。
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.9\textwidth]{img/diskann_layout.png}
+  \caption{DiskANN 的磁碟索引佈局。每個節點是一筆定長記錄
+  （全精度向量、鄰居數、定長鄰居 ID 列表，不足補零），多筆節點打包進固定大小的 sector，
+  節點 ID 由位置隱含決定。因此每個 beam search hop 對應一次 4\,KB 隨機讀取，
+  且 re-rank 所需的全精度向量與鄰居列表存放於同一筆記錄。}
+  \label{fig:diskann-layout}
+\end{figure}
 
 \section{Page Layout and Search Reordering}
 
-Starling 提出將 graph traversal 與 page layout 緊密對齊的思路。
-它透過 block shuffling 讓單一 page 內包含更高比例的鄰近節點，並搭配 memory navigation graph
-縮短搜尋路徑，從而提升每次 page read 的有效資訊量\cite{wang2024starling}.
-這個方向的關鍵洞察是：對磁碟式 ANN 而言，減少 page 數量不一定足夠，還必須提高每次讀取的資訊密度。
-
-然而，page layout 的效果高度依賴離線重排與靜態索引假設。
-若資料持續更新，新的節點未必能立即享有重排後的 locality；若記憶體預算降低，
-navigation graph 的品質也可能下降，進而讓 search path 變長。
-因此，page-based 方法雖然在固定測試設定下表現亮眼，卻不一定適合所有生產工作負載。
+減少讀取的 page 數不足以消除 I/O 瓶頸，還須提高每次讀取的資訊密度。Starling 以 block shuffling 將鄰近節點打包進同一 page，並以取樣資料建立記憶體導航圖縮短搜尋路徑，在靜態索引與中等 recall 下取得顯著加速\cite{wang2024starling}；Select Edges Wisely 則以單調路徑感知的圖布局進一步壓低磁碟 I/O\cite{yue2025selectedges}. 這類方法的效益依賴離線重排與靜態布局假設：資料更新時新節點無法即時享有重排後的 locality，記憶體預算下降時導航圖品質亦隨之退化、搜尋路徑變長。因此其在固定測試設定下表現亮眼，卻不一定適合更新頻繁或資源受限的生產工作負載。
 
 \section{Early Termination for ANN Search}
 
-早停式搜尋的核心思想是：不同 query 的難度不一樣，因此不應對所有 query 都使用相同搜尋預算。
-Learned adaptive early termination 提供了一種將搜尋進展與終止條件連結的思路\cite{li2020adaptiveet}，
-而 DARTH 進一步把 recall 目標顯式化，主張可以在 per-query 的層級上根據收斂情況決定是否停止\cite{chatzakis2025darth}.
-Patience in Proximity 則從 HNSW traversal 出發，提出以結果穩定性作為停止依據的簡潔策略\cite{teofili2025patience}.
-
-這些研究共同說明，fixed-parameter search 很難同時照顧 easy query 與 hard query。
-若參數調得保守，easy query 會浪費過多 hops；若參數調得激進，hard query 的 recall 又可能受損。
-PaceANN 的 ET 設計採取較直接的 frontier-vs-top-$k$ 比較，目的在於把 query-adaptive 的概念帶回 DiskANN 搜尋主迴圈中，
-讓終止條件能夠隨查詢進展即時調整。
+固定搜尋預算對難易查詢一視同仁，在 easy query 上浪費 hops、在 hard query 上損及 recall。針對此已有多種 query-adaptive 早停：以學習模型預測終止點\cite{li2020adaptiveet}、以宣告式 recall 目標驅動停止\cite{chatzakis2025darth}、以 top-$k$ 結果穩定性為判據\cite{teofili2025patience}、以距離自適應調整 beam 寬並給出正確性保證\cite{aljazzazi2025dabs}，或依查詢分布調整探索策略\cite{zhang2025distributionaware}. 這些方法多在記憶體內索引（如 HNSW）上驗證，其終止判斷未與磁碟式系統的 I/O 路徑與快取共同設計，因此難以直接把「少發 I/O」轉化為 serving 下的吞吐與尾延遲改善。
 
 \section{Positioning of PaceANN}
 
-綜合以上文獻，PaceANN 不是試圖取代圖式索引或 page-based 方法，而是從另一個角度處理同一問題：
-在保留 DiskANN 索引結構的前提下，以 DRAM cache 與 adaptive ET 降低無效的磁碟讀取與候選展開。
-和 Starling 相比，PaceANN 不依賴全新的 page layout；和傳統 DiskANN 相比，
-PaceANN 又能透過快取與 early stopping 明顯減少查詢成本。
-這種設計讓它特別適合高 recall、需要 server-side 並發處理、且資料更新頻繁的環境。
+PaceANN 不重建索引布局，也不取代圖式或 page-based 方法，而是在保留 DiskANN 索引語義的前提下，直接針對「高並發下冗餘 I/O 灌入共享 SSD 佇列」這個 serving 瓶頸。與 Starling 相比，它不依賴新的靜態 page layout，改以隨工作負載演化的動態快取涵蓋各查詢專屬、且隨分布漂移的收斂熱區；與既有早停相比，它把 frontier 與 top-$k$ 的跨尺度比較嵌入 DiskANN 的 beam search 主迴圈，並與快取共同設計，使收斂端的終止信號可靠。這種設計使 PaceANN 特別適合高 recall、需 server 端並發處理、且資料頻繁更新的部署情境。
