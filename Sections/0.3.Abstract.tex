@@ -21,21 +21,23 @@
 
 \normalsize
 
-Approximate nearest neighbor search (ANNS) is a core component of vector databases and recommendation systems.
-At billion scale the index no longer fits in memory, making disk-based graph indexes the mainstream approach; their query latency, however, is dominated by random disk reads.
-Existing solutions fall into two categories: graph-based indexes such as DiskANN preserve search quality under a limited memory budget but pay a substantial I/O cost during traversal,
-while page-layout optimizations such as Starling raise the information density of each read yet depend on a static layout and exhibit long tail latency under concurrent serving.
-We observe that the resulting waste is both spatial and temporal: traversal hotspots concentrate on few nodes, and a globally fixed search list size keeps easy queries expanding after their results have converged.
-To address both, we propose PaceANN, an acceleration scheme for disk-based ANNS that requires no index rebuild.
-Building on the memory (DRAM) over disk (SSD) storage hierarchy, PaceANN introduces two mechanisms.
-The first is an adaptive cache: a sharded CLOCK structure that \emph{dynamically} accumulates, according to the evolving access hotspots, the neighbor lists and
-full-precision vectors of frequently visited nodes at query time, so that cache hits avoid extra disk reads; a breadth-first traversal rooted at the medoid serves only as a cold-start seed,
-and a cache miss falls back to the original disk read path, leaving search semantics unchanged.
-The second is adaptive early termination, which decides a per-query stopping point inside the beam-search loop from the convergence of the current results against exact distances,
-so that easy queries stop early while hard queries keep expanding.
-Under an equal memory budget and at iso-recall, PaceANN improves query throughput while lowering P99/P999 tail latency in high-concurrency server mode:
-the adaptive cache helps most under workloads with query locality, whereas early termination provides a consistent throughput gain in the high-recall regime.
-% TODO(final numbers): the previous claim "6.56x/6.8x/13.8x over Starling (SIFT100M, ~95% recall, C=8)" was contaminated by warm/repeat queries and has been removed; fill in concrete ratios from the de-contaminated, iso-recall experiments.
+Approximate nearest neighbor search (ANNS) is a core component of vector databases, retrieval, and recommendation systems.
+At the hundred-million scale the index no longer fits in memory, making disk-based graph indexes such as DiskANN the mainstream approach;
+however, when a server concurrently handles many clients, the large volume of in-flight queries drives the SSD queue depth too high,
+producing tail latency that violates service-level agreements (SLAs).
+We identify two root causes. First, multi-user queries exhibit temporal locality: the hot nodes drift as the query distribution changes,
+yet a static breadth-first (BFS) cache cannot adapt, so hot nodes traversed by many queries are read from disk repeatedly.
+Second, although an easy query has already converged, beam search keeps expanding until the search budget is exhausted,
+incurring unnecessary SSD I/O and lengthening the queue wait of other queries; both effects worsen tail latency and throughput.
+To address these, we propose PaceANN, an acceleration scheme for disk-based ANNS that requires no index rebuild and applies directly to existing DiskANN indexes.
+On the DRAM-over-SSD storage hierarchy, PaceANN introduces two co-designed mechanisms.
+The first is an adaptive cache: a sharded CLOCK structure that \emph{dynamically} accumulates and updates the data of frequently visited nodes
+according to the evolving hotspots at query time, raising the cache hit rate.
+The second is adaptive early termination, which decides a per-query stopping point inside the beam-search loop from the convergence between the current candidates and the query,
+so that easy queries stop early while hard queries keep expanding, reducing unnecessary SSD I/O and freeing SSD queue slots.
+In high-concurrency server mode (16 clients, 8\,GB RSS budget), PaceANN improves query throughput while lowering P99 tail latency:
+on SPACEV100M it improves throughput by ?$\times$ over DiskANN and reduces P99 to ?$\times$; on SIFT100M it improves throughput by ?$\times$ and reduces P99 to ?$\times$.
+% TODO(final numbers): fill in the ?x ratios from the de-contaminated, iso-recall, equal-budget experiments (the earlier warm/repeat-contaminated Starling numbers were removed).
 
 \vspace{1cm}
 
