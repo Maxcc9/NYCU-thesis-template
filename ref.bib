@@ -28,8 +28,8 @@
 
 @inproceedings{li2020adaptiveet,
   title={Improving Approximate Nearest Neighbor Search through Learned Adaptive Early Termination},
-  author={{Li et al.}},
-  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
+  author={Li, Conglong and Zhang, Minjia and Andersen, David G. and He, Yuxiong},
+  booktitle={Proceedings of the ACM SIGMOD International Conference on Management of Data},
   year={2020}
 }
 
@@ -58,5 +58,128 @@
   title={Achieving Low-Latency Graph-Based Vector Search via Aligning Best-First Search Algorithm with SSD},
   author={Guo, Hao and Lu, Youyou},
   booktitle={19th USENIX Symposium on Operating Systems Design and Implementation (OSDI 25)},
+  year={2025}
+}
+
+% ===== 基礎文獻（foundational）=====
+
+@article{jegou2011pq,
+  title={Product Quantization for Nearest Neighbor Search},
+  author={J{\'e}gou, Herv{\'e} and Douze, Matthijs and Schmid, Cordelia},
+  journal={IEEE Transactions on Pattern Analysis and Machine Intelligence},
+  volume={33}, number={1}, pages={117--128},
+  year={2011}
+}
+
+@inproceedings{ge2013opq,
+  title={Optimized Product Quantization for Approximate Nearest Neighbor Search},
+  author={Ge, Tiezheng and He, Kaiming and Ke, Qifa and Sun, Jian},
+  booktitle={IEEE Conference on Computer Vision and Pattern Recognition (CVPR)},
+  year={2013}
+}
+
+@article{malkov2020hnsw,
+  title={Efficient and Robust Approximate Nearest Neighbor Search Using Hierarchical Navigable Small World Graphs},
+  author={Malkov, Yu A. and Yashunin, Dmitry A.},
+  journal={IEEE Transactions on Pattern Analysis and Machine Intelligence},
+  volume={42}, number={4}, pages={824--836},
+  year={2020}
+}
+
+@article{fu2019nsg,
+  title={Fast Approximate Nearest Neighbor Search With The Navigating Spreading-out Graph},
+  author={Fu, Cong and Xiang, Chao and Wang, Changxu and Cai, Deng},
+  journal={Proceedings of the VLDB Endowment},
+  volume={12}, number={5}, pages={461--474},
+  year={2019}
+}
+
+@inproceedings{datar2004lsh,
+  title={Locality-Sensitive Hashing Scheme Based on p-Stable Distributions},
+  author={Datar, Mayur and Immorlica, Nicole and Indyk, Piotr and Mirrokni, Vahab S.},
+  booktitle={Proceedings of the 20th Annual Symposium on Computational Geometry (SoCG)},
+  year={2004}
+}
+
+@article{muja2014flann,
+  title={Scalable Nearest Neighbor Algorithms for High Dimensional Data},
+  author={Muja, Marius and Lowe, David G.},
+  journal={IEEE Transactions on Pattern Analysis and Machine Intelligence},
+  volume={36}, number={11}, pages={2227--2240},
+  year={2014}
+}
+
+@techreport{corbato1968clock,
+  title={A Paging Experiment with the Multics System},
+  author={Corbat{\'o}, Fernando J. and Vyssotsky, Victor A.},
+  institution={MIT Project MAC},
+  number={MAC-M-384},
+  year={1968}
+}
+
+@inproceedings{megiddo2003arc,
+  title={{ARC}: A Self-Tuning, Low Overhead Replacement Cache},
+  author={Megiddo, Nimrod and Modha, Dharmendra S.},
+  booktitle={Proceedings of the 2nd USENIX Conference on File and Storage Technologies (FAST)},
+  year={2003}
+}
+
+@article{aumuller2020annbench,
+  title={{ANN-Benchmarks}: A Benchmarking Tool for Approximate Nearest Neighbor Algorithms},
+  author={Aum{\"u}ller, Martin and Bernhardsson, Erik and Faithfull, Alexander},
+  journal={Information Systems},
+  volume={87}, pages={101374},
+  year={2020}
+}
+
+% ===== 近期補充（serving / disk ANN / ET / cache）=====
+
+@article{dean2013tail,
+  title={The Tail at Scale},
+  author={Dean, Jeffrey and Barroso, Luiz Andr{\'e}},
+  journal={Communications of the ACM},
+  volume={56}, number={2}, pages={74--80},
+  year={2013}
+}
+
+@inproceedings{wang2021milvus,
+  title={Milvus: A Purpose-Built Vector Data Management System},
+  author={Wang, Jianguo and Yi, Xiaomeng and Guo, Rentong and Jin, Hai and Xu, Peng and Li, Shengjun and Wang, Xiangyu and Guo, Xiangzhou and Li, Chengming and Xu, Xiaohai and others},
+  booktitle={Proceedings of the ACM SIGMOD International Conference on Management of Data},
+  year={2021}
+}
+
+@article{upreti2025cosmos,
+  title={Cost-Effective, Low Latency Vector Search with Azure Cosmos DB},
+  author={Upreti, Nitish and Simhadri, Harsha Vardhan and Sundar, Hari Sudan and others},
+  journal={Proceedings of the VLDB Endowment},
+  year={2025}
+}
+
+@inproceedings{ren2025storageann,
+  title={Storage-Based Approximate Nearest Neighbor Search: What are the Performance, Cost, and I/O Characteristics?},
+  author={Ren, Zebin and Doekemeijer, Krijn and Apparao, Padma and Trivedi, Animesh},
+  booktitle={IEEE International Symposium on Workload Characterization (IISWC)},
+  year={2025}
+}
+
+@inproceedings{yue2025selectedges,
+  title={Select Edges Wisely: Monotonic Path Aware Graph Layout Optimization for Disk-based ANN Search},
+  author={Yue, Ziyang and Zheng, Bolong and Xu, Ling and Xu, Kanru and Zhang, Shuhao and Du, Yajuan},
+  booktitle={Proceedings of the VLDB Endowment},
+  year={2025}
+}
+
+@article{aljazzazi2025dabs,
+  title={Distance Adaptive Beam Search for Provably Accurate Graph-Based Nearest Neighbor Search},
+  author={Al-Jazzazi, Yousef and Diwan, Haya and Gou, Jinrui and Musco, Cameron and others},
+  journal={arXiv preprint arXiv:2505.15636},
+  year={2025}
+}
+
+@inproceedings{zhou2025threelcache,
+  title={{3L-Cache}: Low Overhead and Precise Learning-based Eviction Policy for Caches},
+  author={Zhou, Wenbin and Niu, Zhixiong and Xiong, Yongqiang and Fang, Juan and Wang, Qian},
+  booktitle={23rd USENIX Conference on File and Storage Technologies (FAST 25)},
   year={2025}
 }

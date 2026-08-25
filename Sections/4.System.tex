@@ -12,6 +12,21 @@
 只改動快取不改動 ET，I/O 節省有上限。}
 兩者必須協同設計，才能構成一個自洽的系統。
 
+PaceANN 的整體架構如圖~\ref{fig:overview} 所示：在原本的 DiskANN 搜尋路徑上，
+每個 hop 先由收斂感知早停（ET）判斷是否可停，再查詢並發感知動態快取（BNC）；
+命中則直接由 DRAM 取得鄰居與全精度向量，未命中才回到共享的 SSD I/O 佇列。
+兩個機制的共同目標，是減少進入該佇列的冗餘讀取。
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\textwidth]{img/paceann_overview.png}
+  \caption{PaceANN 系統總覽。並發查詢由 server 的 worker thread 池處理，
+  每個 hop 先經 ET 閘門（收斂即停），再查 BNC 動態快取；
+  命中直接由 DRAM 供應鄰居列表與全精度向量（供 re-rank），未命中才進入共享 SSD 佇列。
+  灰色為沿用自 DiskANN 的元件，兩個著色機制為本研究的貢獻。}
+  \label{fig:overview}
+\end{figure}
+
 本章按以下順序展開：
 首先建立快取選擇策略的形式基礎，並說明為何靜態覆蓋不足、必須採用動態快取（§\ref{sec:topology}）；
 其次描述並發感知動態快取的設計（§\ref{sec:cache}），
@@ -61,11 +76,16 @@ BNC 的設計同時受四個約束牽制。查找必須支援高並發：16 個 
 插入的頻率相對低：每個節點在首次從 SSD 讀回時插入一次，之後只有被驅逐才需再插入，因此插入路徑可以承擔較高的成本。
 記憶體必須有固定上限，不能因工作負載波動而超出預算。淘汰只需要近似 LRU 的語義，不必付出精確 LRU 維護 doubly-linked list 的代價。
 
-為滿足這些約束，BNC 以 \texttt{node\_id \% 256} 把節點分到 256 個 shard，每個 shard 各自維護一個 CLOCK 替換環與一把 \texttt{shared\_mutex}。
-高頻的查找走 \texttt{shared\_lock}（允許並發讀者），做一次雜湊表查找並設定 atomic reference bit，約 10--20\,ns；
-分成 256 個 shard 後鎖競爭降到約 $1/256$，16 個 thread 平均每個 shard 只有約 0.06 個並發讀者。
-低頻的插入與驅逐則走 \texttt{unique\_lock}，掃描 CLOCK hand 找到 reference bit 為 false 的 slot 原地替換；由於已持有互斥鎖，不會影響同 shard 的查找。
-相較於精確 LRU，CLOCK 省去了每次查找都要更新 doubly-linked list 的 exclusive lock，在讀遠多於寫的 server 場景下，吞吐量與尾延遲都優於 LRU。
+為滿足這些約束，BNC 把節點分到 $S$ 個 shard，每個 shard 各自維護一個 CLOCK 替換環與一把 \texttt{shared\_mutex}。
+shard 數不是固定常數，而是由 worker thread 數 $T$ 推導：取 $S = 2^{\lceil \log_2 T \rceil}$（$T$ 向上取到 2 的次方），
+讓 lock stripe 的數量對齊真正的並發寫入者數量。取 2 的次方的用意在於 shard 選擇可用位元遮罩 \texttt{node\_id \& (S$-$1)} 完成，
+比取模更省；本研究 $T = 16$，故 $S = 16$。
+高頻的查找走 \texttt{shared\_lock}（允許多個並發讀者，讀彼此不互斥），做一次雜湊表查找並遞增 atomic reference 計數（飽和上限 4），約 10--20\,ns。
+低頻的插入與驅逐則走 \texttt{unique\_lock}，且以 \emph{non-blocking} 的 \texttt{try\_lock} 進行：搶不到鎖時直接略過該次插入，而不阻塞查找路徑——
+被略過的節點下次仍會遇到、再擇機補入，因此高並發下查找延遲不受插入競爭影響。掃描 CLOCK hand 時，對 reference 計數大於 0 的 slot 遞減一次（second chance），第一個計數為 0 的 slot 即原地替換。
+正因為寫入是非阻塞的，shard 數不需要額外的競爭餘裕倍率；實測將 $S$ 由 16 放大到 256，吞吐量的變化在量測雜訊範圍內，顯示效能對 $S$ 並不敏感。
+相較於精確 LRU，CLOCK\cite{corbato1968clock} 省去了每次查找都要更新 doubly-linked list 的 exclusive lock，在讀遠多於寫的 server 場景下，吞吐量與尾延遲都優於精確 LRU 及其自適應變體（如 ARC\cite{megiddo2003arc}）；
+近期雖有以學習式策略提升命中率的淘汰法\cite{zhou2025threelcache}，但其決策開銷不適合置於本系統的高並發查找熱路徑。
 
 除了替換策略，BNC 還做了座標共存（coordinate co-storage）。標準 DiskANN 的搜尋流程分為兩個階段：
 （1）traversal：以 PQ 距離引導的 beam search，只需鄰居 IDs；
@@ -84,6 +104,18 @@ BNC 在快取項目裡一併存下節點的原始座標（raw uint8 coordinates�
 而非僅在 traversal 階段成立。
 代價是每個 BNC entry 需要額外儲存 $d_\text{raw}$ bytes 的座標（例如 128 bytes for uint8 SIFT），
 在記憶體預算配置時需一併納入計算。
+BNC 的整體結構與查詢／插入路徑如圖~\ref{fig:bnc} 所示。
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\textwidth]{img/bnc_cache.png}
+  \caption{並發感知動態快取（BNC）。節點依 \texttt{node\_id \& (S$-$1)} 分到某個 shard，
+  每個 slot 以座標共存的方式同時保存鄰居列表與全精度向量。
+  命中時直接由 DRAM 供應這兩者（導航與 re-rank 皆免回盤）；
+  未命中才發出 SSD 讀取，讀回後連同鄰居與座標一併插入，並更新 CLOCK 計數。
+  查找走 shared-lock（允許並發讀者），插入以 non-blocking 的 try-lock 進行，搶不到即略過。}
+  \label{fig:bnc}
+\end{figure}
 
 除了啟動時的 BFS 種子外，BNC 採用需求驅動（demand-fill）的填充方式：
 節點的鄰居列表在首次從 SSD 讀取後才被填入，而不是批量預載。
@@ -220,7 +252,7 @@ server 回傳 top-$K$ 的 node ID 與精確距離。所有計時（平均、P50�
 元件 & 設計選擇 & 理論依據 \\
 \midrule
 動態快取冷啟動 & BFS-from-medoid 種子（分片均等預算） & 入口鄰域造訪頻率最高；僅作冷啟動 \\
-快取替換策略 & CLOCK（256 shard） & 高並發讀取下 CLOCK > LRU（省去 unique-lock 更新）\\
+快取替換策略 & CLOCK（$S=2^{\lceil\log_2 T\rceil}$ shard，遮罩定址） & 高並發讀取下 CLOCK > LRU；shard 數對齊 thread 數、寫入非阻塞 \\
 快取座標共存 & 鄰居 ID 與全精度向量共存 & 消除 re-rank 的 SSD I/O，並供 ET 精確距離 \\
 ET 停止條件 & 跨尺度精確門檻 $d_\text{PQ} > \theta\, d_\text{exact}(2k)$ & 零額外 I/O 的收斂信號 \\
 ET 安全網 & patience $P$ + 最小 hop $t_\text{min}$ & 防止單跳噪聲與 top-$k$ 未穩定的假陽性 \\

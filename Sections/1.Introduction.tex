@@ -4,12 +4,12 @@
 近年來，支撐檢索、推薦、語意搜尋與多模態理解的向量資料庫規模快速擴張，
 使得 Approximate Nearest Neighbor Search（ANNS）成為大規模系統中的核心操作之一。
 在億級以上的資料集上，若仍以精確最近鄰搜尋處理每一筆查詢，計算成本與延遲都會迅速失控，
-因此研究社群逐步轉向圖式索引、量化近似與磁碟式儲存等方法，以在 recall 與 throughput 之間取得平衡\cite{subramanya2019diskann,chen2021spann}.
+因此研究社群逐步轉向局部敏感雜湊\cite{datar2004lsh}、圖式索引\cite{malkov2020hnsw,fu2019nsg}與量化近似\cite{jegou2011pq}等方法，以在 recall 與 throughput 之間取得平衡\cite{subramanya2019diskann,chen2021spann}.
 
-DiskANN 是其中最具代表性的磁碟式 graph-based ANNS 系統之一。
+DiskANN 是其中最具代表性的磁碟式 graph-based ANNS 系統之一，並已被整合進實際的向量資料庫與雲端服務\cite{wang2021milvus,upreti2025cosmos}。
 它以 Vamana 圖為核心，透過 PQ 壓縮與 beam search 在單節點上支援百萬到十億級規模的查詢，
 在記憶體使用量上相對節制，但查詢過程仍需要大量隨機磁碟 I/O。
-當資料集規模擴大、並發查詢增加，這些隨機讀取會成為主要瓶頸，導致系統很難同時維持高 recall、低延遲與高吞吐量\cite{subramanya2019diskann}.
+尤其當企業將 RAG 等 agent 服務部署於地端、由多個使用者併發觸發檢索時，資料集規模與並發查詢同時上升，這些隨機讀取便成為主要瓶頸，導致系統難以同時維持高 recall、低延遲與高吞吐量\cite{subramanya2019diskann}.
 
 Starling 則嘗試從 page layout 的角度改善這個問題。
 它透過 block shuffling 與 in-memory navigation graph 提高每次 page read 的資訊密度，
@@ -34,7 +34,3 @@ PaceANN 的設計重點有兩個機制。
   \item 論證動態快取與 ET 的協同必要性，並在 server mode、iso-recall 與等記憶體預算下完成評估。% TODO(定稿數字)：填入去污染後對 DiskANN／Starling／PipeANN 的具體結果
   \item 分析記憶體與並發下的行為，說明兩個機制的協同效果，以及高並發下 shard contention 的界限。
 \end{itemize}
-
-本文其餘章節安排如下。第二章回顧相關研究，第三章介紹 PaceANN 的系統架構與快取設計，
-第四章說明實作方法與實驗流程， 第五章呈現主要實驗結果與消融分析，
-第六章則總結研究發現並說明未來工作方向。
