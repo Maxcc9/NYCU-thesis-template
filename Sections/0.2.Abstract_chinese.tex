@@ -34,8 +34,10 @@
 動態累積並更新高頻節點資料，提升快取命中率；
 其二，收斂感知早停（Convergence-Aware Early Termination, CA-ET）依候選與查詢距離的收斂程度，為每筆查詢個別決定停止時機，
 讓簡單查詢早停、困難查詢續行，減少無效 SSD I/O 並釋出佇列資源。
-實驗顯示，在高並發服務（16 用戶端、RSS 8\,GB 上限）下，PaceANN 同時提升吞吐量並改善 P99 尾延遲：
-SPACEV100M 上吞吐量較 DiskANN 提升 ?×、P99 降至 ?×；SIFT100M 上提升 ?×、P99 降至 ?×。
+實驗顯示，在高並發服務（16 用戶端、RSS 8\,GB 上限）下，PaceANN 在相同召回率下持續超越單純的 DiskANN baseline：
+SPACEV100M 上（Recall@10 $\approx 0.98$）吞吐量提升 1.59 倍，P99 尾延遲同時降低約 6\%；
+SIFT100M 上（Recall@10 $\approx 0.99$）吞吐量提升 1.17 倍，P99 尾延遲與 baseline 相當。
+我們另於十億級規模（SIFT1B，64\,GB 預算）重現同一套結論，iso-recall 下吞吐量最高提升 1.46 倍。
 
 \vspace{1cm}
 

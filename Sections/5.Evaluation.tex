@@ -166,30 +166,32 @@ $C=32$ 則讓並發度追平執行緒數（$C=T$），使每個 worker 都有查
 PaceANN 在此採用 OPQ 壓縮（32\,bytes/vector）與 beam width 8 的配置，並同時啟用動態快取與早停。
 
 圖~\ref{fig:pareto-throughput}~至圖~\ref{fig:pareto-io}~分別呈現三個 100M 級資料集（SPACEV100M／SIFT100M／DEEP100M，由左至右）
-在 $C=16$ 下的四項指標對 Recall@10 的關係。PaceANN（藍色菱形）在 SPACEV100M 與 DEEP100M 的整條曲線上都優於或不劣於其餘三個系統：
-相近召回率下有更高吞吐量、更低延遲、更少 I/O；在 SIFT100M 上，低召回率區段（$L$ 較小、早停尚未大量觸發）與 DiskANN 幾乎持平，
-其餘區段同樣領先。三個資料集一致呈現的模式是：PipeANN 因其管線化 I/O 在低召回率時 I/O 次數與延遲較高，隨召回率上升差距逐漸縮小；
+在 $C=16$ 下的四項指標對 Recall@10 的關係。PaceANN（藍色菱形）在 SPACEV100M 上對 DiskANN、Starling、PipeANN 三者全程領先；
+在 DEEP100M 與 SIFT100M 上則穩定領先 DiskANN 與 Starling，但相對 PipeANN 的優勢並不一致——僅在最低召回率（$L=60$）的點上領先，
+$L$ 提高後 PipeANN（使用其自身最強的 \texttt{pipe\_search} 機制、於其公平並發點量測）反而反超，且差距隨召回率上升而擴大
+（DEEP100M 在 $L=200$ 時 PipeANN QPS 領先 PaceANN 達 24\%）。這代表 PaceANN 相對 DiskANN／Starling 的領先具有一致性，
+但相對 PipeANN 則是資料集相依、甚至領先方向會反轉的結果，本論文選擇誠實呈現而非只挑選有利的資料集比較。
 Starling 的靜態 block-shuffling 佈局讓它在低召回率時 I/O 效率最好，但曲線斜率較陡，高召回率時反而落後於 PaceANN 與 DiskANN。
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{img/fig_pareto_throughput.pdf}
   \caption{iso-recall 下四系統的吞吐量比較（SPACEV100M／SIFT100M／DEEP100M，i.i.d.，$C=16$，8\,GB 預算）。
-  PaceANN 在 SPACEV100M／DEEP100M 全域領先，SIFT100M 僅在低召回率區段與 DiskANN 打平。}
+  PaceANN 對 DiskANN／Starling 在三個資料集上皆全域領先；對 PipeANN 則僅 SPACEV100M 全域領先，SIFT100M／DEEP100M 上 PipeANN 在中高召回率區段反超。}
   \label{fig:pareto-throughput}
 \end{figure}
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{img/fig_pareto_mean_latency.pdf}
-  \caption{iso-recall 下四系統的平均延遲比較（同圖~\ref{fig:pareto-throughput}~設定）。趨勢與吞吐量互為倒數，PaceANN 曲線在高召回率區段的延遲增幅明顯較其他系統平緩。}
+  \caption{iso-recall 下四系統的平均延遲比較（同圖~\ref{fig:pareto-throughput}~設定）。趨勢與吞吐量互為倒數：PaceANN 對 DiskANN／Starling 的延遲增幅在高召回率區段明顯較平緩，但對 PipeANN（SIFT100M／DEEP100M）則沒有這個優勢，與圖~\ref{fig:pareto-throughput}~呈現相同的交叉模式。}
   \label{fig:pareto-mean-latency}
 \end{figure}
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{img/fig_pareto_tail_latency.pdf}
-  \caption{iso-recall 下四系統的 P99 尾延遲比較（同圖~\ref{fig:pareto-throughput}~設定）。PipeANN 在 SPACEV100M 低召回率點出現的尖峰反映單次量測雜訊（見 \S\ref{sec:eval-compare} 高並發討論），非系統性趨勢。}
+  \caption{iso-recall 下四系統的 P99 尾延遲比較（同圖~\ref{fig:pareto-throughput}~設定）。PipeANN 在 SPACEV100M 低召回率點出現的尖峰反映單次量測雜訊（見 \S\ref{sec:eval-compare} 高並發討論），非系統性趨勢；SIFT100M／DEEP100M 上 PipeANN 在中高召回率區段的尾延遲反而低於 PaceANN，與圖~\ref{fig:pareto-throughput}~的交叉模式一致。}
   \label{fig:pareto-tail-latency}
 \end{figure}
 
@@ -266,60 +268,6 @@ full                   & 3265.1 & 4820.9 & 120.06 \\
 顯示消除收斂後冗餘 hop 是本實驗設定下更主要的增益來源；而 \texttt{full} 對 \texttt{ET\_only} 僅再貢獻 $+6.8\%$（$C=16$）到 $+8.8\%$（$C=32$），
 代表快取對早停可靠性的「使能效應」存在但幅度不大——與平均 I/O 的變化趨勢一致（210.26 $\to$ 177.08 $\to$ 136.54 $\to$ 120.06）。
 此一使能效應正是 \S\ref{sec:codesign} 協同必要性論點的直接實驗驗證。
-
-%-------------------------------------------------------------
-\section{工作負載局部性}
-\label{sec:eval-locality}
-%-------------------------------------------------------------
-
-動態快取的價值取決於查詢是否具有局部性。我們以 Zipf 參數 $s$ 由 $0$（無重複、純均勻）
-掃到 $1.5$（高度集中），觀察各系統的 QPS 與平均 I/O 隨局部性變化的趨勢。
-
-\begin{table}[h]
-\centering
-\caption{局部性 sweep：QPS 與平均 I/O 隨 Zipf $s$ 的變化（固定召回率）}
-\label{tab:eval-locality}
-\begin{tabular}{lccc}
-\toprule
-Zipf $s$ & DiskANN QPS & PaceANN QPS & PaceANN 平均 I/O \\
-\midrule
-0.0（均勻） & 待填 & 待填 & 待填 \\
-0.5        & 待填 & 待填 & 待填 \\
-1.0        & 待填 & 待填 & 待填 \\
-1.5        & 待填 & 待填 & 待填 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-預期的趨勢是：局部性越強，PaceANN 的動態快取命中越多、平均 I/O 塌陷、QPS 顯著上升；
-靜態的 DiskANN 幾乎持平，而 PipeANN 因為沒有自適應快取，也無法從局部性受益。
-
-%-------------------------------------------------------------
-\section{高並發尾延遲}
-\label{sec:eval-tail}
-%-------------------------------------------------------------
-
-尾延遲是伺服器情境的關鍵指標。我們固定召回率，把並發度 $C$ 由 $1$ 掃到機器的執行緒上限，
-比較各系統的 P99 與 P999 延遲。
-
-\begin{table}[h]
-\centering
-\caption{尾延遲隨並發度的變化（固定召回率）}
-\label{tab:eval-tail}
-\begin{tabular}{lcccc}
-\toprule
-並發度 $C$ & DiskANN P99 & Starling P99 & PipeANN P99 & PaceANN P99 \\
-\midrule
-1  & 待填 & 待填 & 待填 & 待填 \\
-8  & 待填 & 待填 & 待填 & 待填 \\
-16 & 待填 & 待填 & 待填 & 待填 \\
-32 & 待填 & 待填 & 待填 & 待填 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-動態快取透過座標共存讓命中節點免去 re-rank 的回盤，是壓低 P99／P999 的主要來源；
-早停則減少進入共享 NVMe 佇列的冗餘讀取，在高並發時緩解佇列排隊。
 
 %-------------------------------------------------------------
 \section{$\theta$ 參數敏感性}

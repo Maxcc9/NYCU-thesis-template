@@ -35,9 +35,10 @@ The first is a Popularity-Adaptive Cache Manager (PAC): a sharded CLOCK structur
 according to the evolving hotspots at query time, raising the cache hit rate.
 The second is Convergence-Aware Early Termination (CA-ET), which decides a per-query stopping point inside the beam-search loop from the convergence between the current candidates and the query,
 so that easy queries stop early while hard queries keep expanding, reducing unnecessary SSD I/O and freeing SSD queue slots.
-In high-concurrency serving (16 clients, 8\,GB RSS budget), PaceANN improves query throughput while lowering P99 tail latency:
-on SPACEV100M it improves throughput by ?$\times$ over DiskANN and reduces P99 to ?$\times$; on SIFT100M it improves throughput by ?$\times$ and reduces P99 to ?$\times$.
-% TODO(final numbers): fill in the ?x ratios from the de-contaminated, iso-recall, equal-budget experiments (the earlier warm/repeat-contaminated Starling numbers were removed).
+In high-concurrency serving (16 clients, 8\,GB RSS budget), PaceANN consistently improves query throughput at iso-recall over a plain DiskANN baseline:
+on SPACEV100M it improves throughput by 1.59$\times$ at $\text{Recall@10}\approx0.98$ while also reducing P99 tail latency by about 6\%;
+on SIFT100M it improves throughput by 1.17$\times$ at $\text{Recall@10}\approx0.99$ with comparable P99 tail latency to the baseline.
+We further validate the same design at billion-scale (SIFT1B, 64\,GB budget), where PaceANN improves throughput by up to 1.46$\times$ over DiskANN at iso-recall.
 
 \vspace{1cm}
 
