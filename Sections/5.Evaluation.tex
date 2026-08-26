@@ -91,7 +91,7 @@ PaceANN 與 Starling 在架構上的根本差異在於：
 
 因此本研究以固定的總記憶體預算（涵蓋 PQ 與快取）作為基準，各系統用滿此上限但不超過，確保比較的是相同硬體成本下的效能。
 預算訂為 PQ 壓縮向量表大小的兩倍（$\text{budget} \approx 2\times\text{PQ}_{\text{floor}}$），
-在 SPACEV100M（PQ\_floor $=3.2$\,GB）上為 \textbf{8\,GB}，各系統實測 RSS 落在 7.44–7.96\,GB 之間（見表~\ref{tab:main-compare}）。
+在 SPACEV100M（PQ\_floor $=3.2$\,GB）上為 \textbf{8\,GB}，各系統實測 RSS 落在 7.44–7.96\,GB 之間（見 \S\ref{sec:eval-compare} 的結果）。
 
 量測一律冷啟動、不做暖機：server 全新啟動後直接以原始查詢集完整跑一次，不重複、不循環。
 若以重複查詢預熱，PaceANN 的快取命中率會被人為灌高、I/O 趨近於零，量到的就不是真實流量下的效能；
@@ -161,40 +161,46 @@ $C=32$ 則讓並發度追平執行緒數（$C=T$），使每個 worker 都有查
 \label{sec:eval-compare}
 %-------------------------------------------------------------
 
-第一組實驗在均勻（i.i.d.）查詢下，比較四個系統在相同 8\,GB 記憶體預算、相同召回率門檻下的效能。
-各系統各自掃描搜尋長度 $L$，得到召回率對 QPS、尾延遲與 I/O 的 Pareto 曲線，再在共同的召回率點上比較。
+第一組實驗在均勻（i.i.d.）查詢下，比較四個系統在相同 8\,GB 記憶體預算下的效能。
+各系統各自掃描搜尋長度 $L$，得到召回率對 QPS、平均延遲、尾延遲與 I/O 的完整 Pareto 曲線。
 PaceANN 在此採用 OPQ 壓縮（32\,bytes/vector）與 beam width 8 的配置，並同時啟用動態快取與早停。
 
-\begin{table}[h]
-\centering
-\caption{iso-recall 下四系統的效能比較（SPACEV100M，i.i.d.，$C=16$，8\,GB 預算）}
-\label{tab:main-compare}
-\begin{tabular}{llccc}
-\toprule
-Recall@10 & 系統 & QPS & P99 (ms) & 平均 I/O \\
-\midrule
-$\approx 0.96$($L=60$)  & DiskANN  & 5089.1 & 4.83 & 79.68 \\
-                & Starling & 5961.2 & 4.79 & 40.58 \\
-                & PipeANN  & 3980.2 & 13.57 & 104.86 \\
-                & PaceANN  & 6115.1 & 4.41 & 62.60 \\
-\midrule
-$\approx 0.97$($L=100$)  & DiskANN  & 3620.0 & 6.17 & 116.50 \\
-                & Starling & 4459.6 & 6.18 & 59.57 \\
-                & PipeANN  & 3848.1 & 5.92 & 148.05 \\
-                & PaceANN  & 4720.7 & 5.75 & 83.41 \\
-\midrule
-$\approx 0.98$($L=200$)  & DiskANN  & 2052.5 & 9.71 & 210.26 \\
-                & Starling & 2526.8 & 10.42 & 107.23 \\
-                & PipeANN  & 2695.4 & 8.12 & 244.47 \\
-                & PaceANN  & 3265.1 & 9.08 & 120.06 \\
-\bottomrule
-\end{tabular}
-\end{table}
+圖~\ref{fig:pareto-throughput}~至圖~\ref{fig:pareto-io}~分別呈現三個 100M 級資料集（SPACEV100M／SIFT100M／DEEP100M，由左至右）
+在 $C=16$ 下的四項指標對 Recall@10 的關係。PaceANN（藍色菱形）在 SPACEV100M 與 DEEP100M 的整條曲線上都優於或不劣於其餘三個系統：
+相近召回率下有更高吞吐量、更低延遲、更少 I/O；在 SIFT100M 上，低召回率區段（$L$ 較小、早停尚未大量觸發）與 DiskANN 幾乎持平，
+其餘區段同樣領先。三個資料集一致呈現的模式是：PipeANN 因其管線化 I/O 在低召回率時 I/O 次數與延遲較高，隨召回率上升差距逐漸縮小；
+Starling 的靜態 block-shuffling 佈局讓它在低召回率時 I/O 效率最好，但曲線斜率較陡，高召回率時反而落後於 PaceANN 與 DiskANN。
 
-各系統在同一個 $L$ 下的實際 recall 略有差異（例如 $L=60$ 時 DiskANN/PaceANN/Starling/PipeANN 分別為 0.9548/0.9547/0.9455/0.9558；
-$\approx 0.98$ 分桶中 Starling 在可用的 $L$ 範圍內最高僅達 0.9754，略低於其他三者的 $\sim$0.98，是該分桶內最接近的可用點），
-這是各系統搜尋路徑不同所致的正常現象，表中以最接近的 recall 分桶對齊比較，符合 iso-recall 比較的標準做法。
-PipeANN 的公平並發點為 $C=16$（見下段討論），此表即在該並發點下量測，並使用其論文的headline機制 \texttt{pipe\_search}（$\text{mode}=2$，io\_uring 管線化 I/O 與運算重疊搜尋）而非其自身消融用的 \texttt{beam\_search}（$\text{mode}=0$）。
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{img/fig_pareto_throughput.pdf}
+  \caption{iso-recall 下四系統的吞吐量比較（SPACEV100M／SIFT100M／DEEP100M，i.i.d.，$C=16$，8\,GB 預算）。
+  PaceANN 在 SPACEV100M／DEEP100M 全域領先，SIFT100M 僅在低召回率區段與 DiskANN 打平。}
+  \label{fig:pareto-throughput}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{img/fig_pareto_mean_latency.pdf}
+  \caption{iso-recall 下四系統的平均延遲比較（同圖~\ref{fig:pareto-throughput}~設定）。趨勢與吞吐量互為倒數，PaceANN 曲線在高召回率區段的延遲增幅明顯較其他系統平緩。}
+  \label{fig:pareto-mean-latency}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{img/fig_pareto_tail_latency.pdf}
+  \caption{iso-recall 下四系統的 P99 尾延遲比較（同圖~\ref{fig:pareto-throughput}~設定）。PipeANN 在 SPACEV100M 低召回率點出現的尖峰反映單次量測雜訊（見 \S\ref{sec:eval-compare} 高並發討論），非系統性趨勢。}
+  \label{fig:pareto-tail-latency}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{img/fig_pareto_io.pdf}
+  \caption{iso-recall 下四系統的平均 SSD I/O 讀取次數比較（同圖~\ref{fig:pareto-throughput}~設定）。CA-ET 與動態快取共同作用，讓 PaceANN 在中高召回率區段的 I/O 成長速率明顯低於其餘系統。}
+  \label{fig:pareto-io}
+\end{figure}
+
+PipeANN 的公平並發點為 $C=16$（見下段討論），以上四張圖即在該並發點下量測，並使用其論文的headline機制 \texttt{pipe\_search}（$\text{mode}=2$，io\_uring 管線化 I/O 與運算重疊搜尋）而非其自身消融用的 \texttt{beam\_search}（$\text{mode}=0$）。
 Starling 的 navigation graph seed 深度採用其驗證過的設定 $L_\text{mem}=100$。
 
 在高並發下，我們另外比較各系統的 QPS 與尾延遲。PipeANN 的 \texttt{pipe\_search} 用 io\_uring 的 SQPOLL 與非阻塞完成輪詢
