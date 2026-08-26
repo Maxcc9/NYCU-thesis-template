@@ -21,25 +21,22 @@
 
 \normalsize
 
-Approximate nearest neighbor search (ANNS) is a core component of vector databases, retrieval, and recommendation systems.
-At the hundred-million scale the index no longer fits in memory, making disk-based graph indexes such as DiskANN the mainstream approach;
-however, when a server concurrently handles many clients, the large volume of in-flight queries drives the SSD queue depth too high,
-producing tail latency that violates service-level agreements (SLAs).
-We identify two root causes. First, multi-user queries exhibit temporal locality: the hot nodes drift as the query distribution changes,
-yet a static breadth-first (BFS) cache cannot adapt, so hot nodes traversed by many queries are read from disk repeatedly.
-Second, although an easy query has already converged, beam search keeps expanding until the search budget is exhausted,
-incurring unnecessary SSD I/O and lengthening the queue wait of other queries; both effects worsen tail latency and throughput.
-To address these, we propose PaceANN, an acceleration scheme for disk-based ANNS that requires no index rebuild and applies directly to existing DiskANN indexes.
-On the DRAM-over-SSD storage hierarchy, PaceANN introduces two co-designed mechanisms.
-The first is a Popularity-Adaptive Cache Manager (PAC): a sharded CLOCK structure that \emph{dynamically} accumulates and updates the data of frequently visited nodes
-according to the evolving hotspots at query time, raising the cache hit rate.
-The second is Convergence-Aware Early Termination (CA-ET), which decides a per-query stopping point inside the beam-search loop from the convergence between the current candidates and the query,
-so that easy queries stop early while hard queries keep expanding, reducing unnecessary SSD I/O and freeing SSD queue slots.
-In high-concurrency serving (16 clients, 8\,GB RSS budget), PaceANN consistently improves query throughput at iso-recall over a plain DiskANN baseline:
-on SPACEV100M it improves throughput by 1.59$\times$ at $\text{Recall@10}\approx0.98$ while also reducing P99 tail latency by about 6\%;
-on SIFT100M it improves throughput by 1.17$\times$ at $\text{Recall@10}\approx0.99$ with comparable P99 tail latency to the baseline.
-We further validate the same design at billion-scale (SIFT1B, 64\,GB budget), where PaceANN improves throughput by up to 1.46$\times$ over DiskANN at iso-recall.
+Approximate nearest neighbor search (ANNS) is a core operation in vector databases, retrieval systems, and recommendation platforms.
+At the hundred-million-vector scale, disk-based graph indexes such as DiskANN are widely used because the full index cannot fit entirely in memory.
+However, concurrent serving creates many in-flight random SSD reads, increasing queue depth, reducing throughput, and worsening tail latency.
+
+This thesis presents PaceANN, an acceleration layer for DiskANN-style disk-based ANNS that does not require rebuilding or relaying out the existing index.
+PaceANN targets two forms of avoidable work.
+First, static caches cannot adapt when hot graph nodes shift with the query distribution.
+Second, fixed-budget beam search continues expanding even after easy queries have effectively converged.
+To address these issues, PaceANN combines two mechanisms.
+The Popularity-Adaptive Cache Manager (PAC) uses a sharded CLOCK cache to retain frequently visited nodes during serving, storing both neighbor lists and full-precision vectors to reduce traversal and re-ranking I/O.
+Convergence-Aware Early Termination (CA-ET) stops each query according to its own convergence state by comparing the best unexpanded frontier candidate with exact-distance candidates already observed during search.
+
+With 16 concurrent clients and an 8\,GB resident-memory budget, PaceANN improves throughput over a plain DiskANN baseline at comparable recall.
+On SPACEV100M, it improves throughput by 1.59$\times$ at $\text{Recall@10}\approx0.98$ and reduces P99 latency by about 6\%.
+On SIFT100M, it improves throughput by 1.17$\times$ at $\text{Recall@10}\approx0.99$ while keeping P99 latency comparable to the baseline.
 
 \vspace{1cm}
 
-\textbf{Keywords:} approximate nearest neighbor search, disk-based graph index, layered caching, early termination, tail latency
+\textbf{Keywords:} approximate nearest neighbor search, disk-based graph index, adaptive caching, early termination, tail latency

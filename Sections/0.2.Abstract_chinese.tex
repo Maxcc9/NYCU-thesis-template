@@ -20,25 +20,20 @@
 
 \normalsize
 
-近似最近鄰搜尋（approximate nearest neighbor search）已是向量資料庫與檢索、推薦系統的核心元件。
-當資料規模達億級、索引無法完整載入記憶體時，磁碟式圖索引（如 DiskANN）成為主流方案；
-但在同時服務多個用戶端的並發服務下，大量並行查詢會使 SSD 佇列深度（queue depth）過深，
-造成違反服務等級協議（service level agreement, SLA）的長尾延遲（tail latency）。
-我們觀察到兩個根源。其一，多用戶查詢具有時間局部性：熱點節點會隨查詢分布漂移，
-而傳統 BFS 靜態快取無法隨之更新，使共同走訪的熱點仍須重複磁碟讀取。
-其二，簡單查詢雖已提早收斂，束搜尋（beam search）卻仍展開至預算耗盡，
-徒增無效 SSD I/O 並拉長其他查詢的佇列等待；兩者共同惡化尾延遲與吞吐量。
-為此，我們提出 PaceANN——一套無須重建索引、可直接套用於既有 DiskANN 索引的磁碟式加速方案，
-在 DRAM 與 SSD 的分層儲存上引入兩個相互協同的機制。
-其一，熱門度自適應快取管理器（Popularity-Adaptive Cache Manager, PAC）以分片式 CLOCK（sharded CLOCK）在查詢期間依熱點
-動態累積並更新高頻節點資料，提升快取命中率；
-其二，收斂感知早停（Convergence-Aware Early Termination, CA-ET）依候選與查詢距離的收斂程度，為每筆查詢個別決定停止時機，
-讓簡單查詢早停、困難查詢續行，減少無效 SSD I/O 並釋出佇列資源。
-實驗顯示，在高並發服務（16 用戶端、RSS 8\,GB 上限）下，PaceANN 在相同召回率下持續超越單純的 DiskANN baseline：
-SPACEV100M 上（Recall@10 $\approx 0.98$）吞吐量提升 1.59 倍，P99 尾延遲同時降低約 6\%；
-SIFT100M 上（Recall@10 $\approx 0.99$）吞吐量提升 1.17 倍，P99 尾延遲與 baseline 相當。
-我們另於十億級規模（SIFT1B，64\,GB 預算）重現同一套結論，iso-recall 下吞吐量最高提升 1.46 倍。
+近似最近鄰搜尋（approximate nearest neighbor search, ANNS）是向量資料庫、檢索系統與推薦平台中的核心操作。
+當資料規模達到億級時，完整索引通常無法全部常駐記憶體，因此 DiskANN 這類磁碟式圖索引被廣泛採用。
+然而，在並發服務下，大量在途查詢會產生密集的 SSD 隨機讀取，推高佇列深度，進而降低吞吐量並惡化長尾延遲。
+
+本論文提出 PaceANN，一個可套用於 DiskANN 式磁碟 ANNS 的加速層，且不需要重建或重新布局既有索引。
+PaceANN 針對兩類可避免的工作進行優化。
+第一，靜態快取無法隨查詢分布變化追蹤熱點節點。
+第二，固定預算的束搜尋（beam search）即使在簡單查詢已經收斂後仍會繼續展開。
+為此，PaceANN 結合兩個機制：熱門度自適應快取管理器（Popularity-Adaptive Cache Manager, PAC）以分片式 CLOCK 快取在服務過程中保留高頻節點，並同時保存鄰居列表與全精度向量，以減少 traversal 與 re-rank 的 I/O；收斂感知早停（Convergence-Aware Early Termination, CA-ET）則依每筆查詢的收斂狀態決定停止時機，透過比較 frontier 中最佳未展開候選與搜尋過程中已取得的精確距離候選，避免無效展開。
+
+在 16 個並發用戶端、8\,GB resident-memory 預算下，PaceANN 相較於單純 DiskANN baseline 能在相近召回率下提升吞吐量。
+在 SPACEV100M 上，PaceANN 於 $\text{Recall@10}\approx0.98$ 達到 1.59$\times$ 的吞吐量提升，並使 P99 延遲降低約 6\%。
+在 SIFT100M 上，PaceANN 於 $\text{Recall@10}\approx0.99$ 提升吞吐量 1.17$\times$，同時維持與 baseline 相近的 P99 延遲。
 
 \vspace{1cm}
 
-\textbf{關鍵字：}近似最近鄰搜尋, 磁碟式圖索引, 分層快取, 提前終止, 尾端延遲
+\textbf{關鍵字：}近似最近鄰搜尋, 磁碟式圖索引, 自適應快取, 提前終止, 長尾延遲

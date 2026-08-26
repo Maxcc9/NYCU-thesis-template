@@ -1,38 +1,18 @@
 \chapter{Conclusions}
 \label{ch:conclusion}
 
-本論文提出 PaceANN，一個以 DiskANN 為基礎、透過熱門度自適應快取管理器（Popularity-Adaptive Cache Manager, PAC）與收斂感知早停（Convergence-Aware Early Termination, CA-ET）兩個機制加速的磁碟式 ANNS 系統。
-與單純依賴圖式索引或 page layout 的做法不同，PaceANN 的重點在於保留原始索引語義，
-並在搜尋階段逐步降低不必要的 traversal I/O 與無效展開。
+This thesis presents PaceANN, a disk-based ANNS system that improves DiskANN-style search without rebuilding the index.
+PaceANN combines the Popularity-Adaptive Cache Manager (PAC) with Convergence-Aware Early Termination (CA-ET).
+PAC reduces SSD reads by caching frequently visited nodes together with their full-precision vectors, while CA-ET stops easy queries after convergence and avoids unnecessary beam-search expansions.
 
-在均勻（i.i.d.）查詢負載下，PaceANN 於 SPACEV100M、SIFT100M、DEEP100M 三個 100M 級資料集的並發服務比較中，
-在相同 8\,GB 記憶體預算、相同召回率門檻下，QPS 全面超越 DiskANN baseline 與 Starling；
-但相對於使用其自身最強機制、於公平並發點量測的 PipeANN，結果並非單向領先——SPACEV100M 上全程領先，
-SIFT100M／DEEP100M 上則在中高召回率區段被 PipeANN 反超。這個結果沒有被弱化或省略：
-它說明 PaceANN 的優勢主要建立在「保留原始索引語義、避免重建索引」的漸進式改造路線上，
-而非在所有場景下都優於針對特定 I/O 子系統重新設計排程的方案。
-消融實驗進一步顯示，PaceANN 對 DiskANN／Starling 的領先主要來自 CA-ET 消除收斂後冗餘 hop 的貢獻（單獨貢獻 QPS +48.9\%~+50.8\%），
-動態快取則在此基礎上提供幅度較小、但方向一致的額外增益。我們也在 SIFT1B（十億級規模，64\,GB 預算）上重現了同一套結論：
-校準後的 PaceANN 在 iso-recall 下 QPS 領先 DiskANN baseline 最高達 45.5\%，顯示這條設計路線不僅適用於 100M 級資料，
-在規模放大一個數量級後依然成立。
+The evaluation shows that PaceANN improves concurrent-serving throughput over DiskANN and Starling on SPACEV100M, SIFT100M, and DEEP100M under the same memory budget.
+The comparison with PipeANN is more dataset-dependent: PaceANN leads on SPACEV100M, while PipeANN is stronger in the high-recall region on SIFT100M and DEEP100M.
+The ablation study shows that CA-ET provides the larger share of the improvement, while PAC adds a smaller but consistent gain and supports the convergence signal.
 
-不過，本研究也揭示了幾個限制，其中一部分是在校準過程中親身踩過的教訓，而非事前預期的風險。
-首先，CA-ET 的核心參數 $\theta$ 以及動態快取的冷啟動種子數（seed count）都被證實是\emph{機器與配置相依}的超參數：
-同一個 $\theta$ 值換了資料集、甚至只是換了實驗機器，效果就可能從「有效」變成「幾乎沒作用」；
-本研究在 SIFT100M 上就曾因此讓 PaceANN 一度落後 baseline，直到重新掃描校準才修正過來。
-這代表目前的設計仍需要逐資料集、逐環境的手動校準，沒有一組固定參數能開箱即用地適用所有工作負載。
-其次，自適應快取以分片與非阻塞插入緩解了鎖競爭，但座標共存讓每個快取項目的記憶體成本上升，
-在固定預算下會壓縮可快取的節點數，這個取捨仍有進一步優化空間。
-最後，查詢局部性（locality）對 PAC 命中率的影響、以及更細緻的並發度尾延遲掃描，
-目前仍缺乏實測數據，是本論文尚未完成、有待後續補齊的評估項目。
+PaceANN still has limitations.
+The CA-ET threshold $\theta$ and cache-seeding parameters require calibration for each dataset and environment.
+Coordinate co-storage also increases the memory cost of each cached node, reducing the number of nodes that can fit under a fixed budget.
+Finally, this thesis does not fully explore query-locality effects or detailed tail-latency behavior across a wider range of concurrency levels.
 
-未來工作可從三個方向展開。
-第一，把 CA-ET 與快取種子數的校準流程自動化——例如依資料集的 PQ 量化誤差分布或線上量測結果自動估計初始參數，
-減少目前對人工逐資料集掃描的依賴，這也是本研究校準過程中最直接感受到的需求。
-第二，讓快取記憶體預算與座標共存與否隨工作負載自適應調整，在命中率與快取容量之間取得更好的平衡。
-第三，補齊查詢局部性與並發尾延遲的完整實測，並把 PaceANN 的 CA-ET 思路延伸到更多 ANN family，
-驗證這種 query-adaptive stopping rule 是否具有更廣泛的適用性。
-
-總結來說，PaceANN 的貢獻不是用單一技巧壓過所有對手，而是把 PAC 與 CA-ET 兩個機制整合成一個可落地、
-且已在百萬級到十億級規模上驗證過的系統。在大規模向量搜尋持續朝高並發與高 recall 發展的趨勢下，
-這種兼顧實用性與可解釋性的設計方向值得繼續探索。
+Future work should automate parameter calibration, adapt cache memory allocation to workload behavior, and evaluate the same stopping principle on other ANN index families.
+Overall, PaceANN demonstrates that reducing avoidable SSD I/O during search is an effective and practical way to improve disk-based graph ANNS under concurrent serving.

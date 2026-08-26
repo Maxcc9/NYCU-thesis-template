@@ -3,213 +3,95 @@
 \label{ch:arch}
 %=============================================================
 
-% ─── 章節破題 ───────────────────────────────────────────────
-本章介紹 PaceANN——一套無須重建索引、可直接套用於既有 DiskANN 的磁碟式搜尋方法。
-它在原本的搜尋路徑上，以兩個相互協同的機制減少進入共享 SSD 佇列的冗餘 I/O：
-\textbf{熱門度自適應快取管理器（PAC）}，把隨工作負載漂移的熱點連同全精度向量留在 DRAM；
-以及\textbf{收斂感知早停（CA-ET）}，在每個 hop 之前以零額外 I/O 的方式判斷 top-$k$ 是否已收斂並提前停止。
-整體資料流如圖~\ref{fig:overview}：每個 hop 先由 CA-ET 判斷可否停止，再查 PAC；
-命中直接由 DRAM 供應鄰居與精確向量，未命中才回到共享 SSD 佇列。
+PaceANN is a disk-based search layer that can be applied directly to existing DiskANN indexes.
+It preserves the original index layout and changes only the search path.
+As shown in Figure~\ref{fig:overview}, each search hop first checks whether the query has converged through Convergence-Aware Early Termination (CA-ET).
+If the query continues, the search consults the Popularity-Adaptive Cache Manager (PAC).
+A cache hit serves the neighbor list and full-precision vector from DRAM; a miss falls back to the original SSD read path.
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=0.6\textwidth]{img/paceann_overview.pdf}
-  \caption{PaceANN 系統總覽。並發查詢由 server 的 worker thread 池處理，
-  每個 hop 先經 CA-ET 閘門（收斂即停），再查 PAC 動態快取；
-  命中直接由 DRAM 供應鄰居列表與全精度向量（供 re-rank），未命中才進入共享 SSD 佇列。}
+  \caption[Overview of PaceANN]{Overview of PaceANN. Concurrent queries are processed by a server-side worker-thread pool. Before each hop, CA-ET decides whether the query has converged. If not, PAC is consulted. Cache hits return the neighbor list and full-precision vector from DRAM for both traversal and re-ranking; misses fall back to the shared SSD queue.}
   \label{fig:overview}
 \end{figure}
 
-這兩個機制並非各自獨立的最佳化，而是彼此需要。第~\ref{ch:motivation}~章的分析顯示：
-\textbf{只改 CA-ET 不改快取，早停的收斂信號在搜尋初期不可靠；只改快取不改 CA-ET，I/O 節省有上限。}
-快取讓前期 top-$k$ 以 DRAM 速度快速穩定，並透過共存的全精度向量直接提供 CA-ET 所需的精確距離；
-CA-ET 則消除連快取也無法省下的收斂後無效展開。這種互依使兩者必須共同設計。
+PAC and CA-ET are designed to work together.
+PAC reduces the cost of useful hops and provides exact vectors for convergence checks.
+CA-ET removes later expansions after the query has converged.
+Together, they reduce the number of random reads entering the shared SSD queue.
 
 %-------------------------------------------------------------
-\section{熱門度自適應快取管理器（PAC）}
+\section{Popularity-Adaptive Cache Manager (PAC)}
 \label{sec:cache}
 %-------------------------------------------------------------
 
-在有限的 DRAM 預算下，要決定優先快取哪些節點的鄰居列表，關鍵在於估計各節點被存取的頻率。
-這個頻率有兩個來源。其一由圖的拓撲決定、與查詢分布無關：
-DiskANN 的 beam search 每次都從固定的入口節點（medoid $m^*$）出發，沿 Vamana 圖的有向邊逐步逼近 query，
-因此離 medoid 越近的節點越常被造訪——medoid 的直接鄰居幾乎每次查詢都會在第一個 hop 被納入候選，
-距離越遠則能經過它的查詢路徑越少、造訪機率快速下降。
-這一層頻率在索引載入後、還沒有任何查詢歷史時就能估算，適合拿來預填冷啟動的快取。
-據此，我們在冷啟動時從 medoid 出發做廣度優先走訪（BFS），按層序把最靠近入口的節點填入快取，
-相當於依預期造訪頻率由高到低選取，立即保護最熱的入口鄰域；
-若改用隨機採樣，大量離入口較遠、頻率偏低的節點會佔掉預算而拉低命中率
-（這也是 Starling 以隨機採樣建立 navigation graph 時命中率不高的原因之一）。
-對含多個 medoid 的索引，我們把種子預算平均分給每個 medoid 各自 BFS，避免某些入口鄰域在冷啟動時完全沒有覆蓋。
+PAC caches graph nodes that are likely to be visited repeatedly.
+It starts with a small cold-start seed built by BFS from the DiskANN medoid, because early search hops repeatedly pass through the entry neighborhood.
+After startup, PAC is demand-filled: when a node is read from SSD, it can be inserted into the cache.
+This lets the cache adapt to the actual query distribution instead of relying only on a static BFS cache or a separate warm-up workload.
 
-但入口鄰域雖最熱，靜態覆蓋並不足以支撐整體效能——這帶出頻率的第二個來源。
-每個查詢真正花時間的是它自己的收斂區，也就是 beam search 在答案附近才展開的那些節點；
-這些節點因查詢而異，還會隨查詢分布（例如 RAG 中熱門主題的變動）持續漂移，
-任何在啟動時就固定下來的集合都蓋不到（見第~\ref{ch:motivation}~章對收斂熱區漂移的分析）。
-因此 PAC 以需求驅動（demand-fill）的動態快取為主體：節點的鄰居列表在首次從 SSD 讀回後才填入，
-在固定記憶體預算內於查詢期間持續演化，自動反映實際工作負載的存取模式並隨分布漂移持續適應。
-BFS 種子在這裡只是冷啟動的起點——消弭初期入口空窗，其後就交由 PAC 的替換策略託管、平滑演化到當前 workload 的分布。
-正因收斂熱區是靠服務過程中的 demand-fill 逐步累積，系統\emph{不依賴}預先的代表性查詢暖機，即可在真實流量下收斂至穩態命中率。
+The cache is sharded to support concurrent serving.
+With $T$ worker threads, PAC uses $S = 2^{\lceil \log_2 T \rceil}$ shards; in our experiments, $T=32$ and $S=32$.
+Shard selection uses the bit mask \texttt{node\_id \& (S$-$1)}.
+Each shard maintains a hash table and a CLOCK replacement ring protected by a \texttt{shared\_mutex}.
+Lookups use shared locks and only update a small atomic reference counter.
+Insertions use non-blocking \texttt{try\_lock}; if the shard is busy, the insertion is skipped rather than delaying the query.
+CLOCK replacement gives recently used entries a second chance while avoiding the per-hit exclusive updates required by exact LRU\cite{corbato1968clock,megiddo2003arc}.
 
-PAC 的設計同時受四個約束牽制。查找必須支援高並發：32 個 worker thread 會同時讀取，若用全域鎖會造成嚴重的序列化瓶頸。
-插入的頻率相對低：每個節點在首次從 SSD 讀回時插入一次，之後只有被驅逐才需再插入，因此插入路徑可以承擔較高的成本。
-記憶體必須有固定上限，不能因工作負載波動而超出預算。淘汰只需要近似 LRU 的語義，不必付出精確 LRU 維護 doubly-linked list 的代價。
-
-為滿足這些約束，PAC 把節點分到 $S$ 個 shard，每個 shard 各自維護一個 CLOCK 替換環與一把 \texttt{shared\_mutex}。
-shard 數不是固定常數，而是由 worker thread 數 $T$ 推導：取 $S = 2^{\lceil \log_2 T \rceil}$（$T$ 向上取到 2 的次方），
-讓 lock stripe 的數量對齊真正的並發寫入者數量。取 2 的次方的用意在於 shard 選擇可用位元遮罩 \texttt{node\_id \& (S$-$1)} 完成，
-比取模更省；本研究 $T = 32$，故 $S = 32$。
-高頻的查找走 \texttt{shared\_lock}（允許多個並發讀者，讀彼此不互斥），做一次雜湊表查找並遞增 atomic reference 計數（飽和上限 4），約 10--20\,ns。
-低頻的插入與驅逐則走 \texttt{unique\_lock}，且以 \emph{non-blocking} 的 \texttt{try\_lock} 進行：搶不到鎖時直接略過該次插入，而不阻塞查找路徑——
-被略過的節點下次仍會遇到、再擇機補入，因此高並發下查找延遲不受插入競爭影響。掃描 CLOCK hand 時，對 reference 計數大於 0 的 slot 遞減一次（second chance），第一個計數為 0 的 slot 即原地替換。
-正因為寫入是非阻塞的，shard 數不需要額外的競爭餘裕倍率；實測將 $S$ 由 8 一路放大到 256，吞吐量的變化都在量測雜訊範圍內，顯示效能對 $S$ 並不敏感。
-相較於精確 LRU，CLOCK\cite{corbato1968clock} 省去了每次查找都要更新 doubly-linked list 的 exclusive lock，在讀遠多於寫的 server 場景下，吞吐量與尾延遲都優於精確 LRU 及其自適應變體（如 ARC\cite{megiddo2003arc}）；
-近期雖有以學習式策略提升命中率的淘汰法\cite{zhou2025threelcache}，但其決策開銷不適合置於本系統的高並發查找熱路徑。
-
-除了替換策略，PAC 還做了座標共存（coordinate co-storage）。標準 DiskANN 的搜尋流程分為兩個階段：
-（1）traversal：以 PQ 距離引導的 beam search，只需鄰居 IDs；
-（2）re-rank：取 top-$k$ 候選的完整原始向量，計算精確距離。
-Re-rank 階段需要從 SSD 讀取 $K$ 個節點的完整向量，
-即使 traversal 已全部命中快取，也仍有不可避免的 SSD 存取。
-
-PAC 在快取項目裡一併存下節點的原始座標（raw uint8 coordinates），
-命中 PAC 的節點在 re-rank 時就能直接從 DRAM 取得精確向量，完全省掉 re-rank 的 SSD 讀取：
-
-此設計使得「PAC 命中的節點貢獻零 SSD I/O」在整個搜尋流程中成立，
-而非僅在 traversal 階段成立。
-代價是每個 PAC entry 需要額外儲存 $d_\text{raw}$ bytes 的座標（例如 128 bytes for uint8 SIFT），
-在記憶體預算配置時需一併納入計算。
-PAC 的整體結構與查詢／插入路徑如圖~\ref{fig:bnc} 所示。
+Each PAC entry stores both the neighbor list and the raw full-precision vector.
+This coordinate co-storage is important because DiskANN normally performs traversal using neighbor IDs and PQ distances, then fetches full vectors again for re-ranking.
+When a node hits in PAC, both traversal and re-ranking can be served from DRAM, so the hit avoids SSD I/O across the full query path.
+The cost is a larger cache entry, which is included in the memory budget.
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=1\textwidth]{img/cache_showcase.pdf}
-  \caption{熱門度自適應快取管理器（PAC）。節點依 \texttt{node\_id \& (S$-$1)} 分到某個 shard，
-  每個 slot 以座標共存的方式同時保存鄰居列表與全精度向量。
-  命中時直接由 DRAM 供應這兩者（導航與 re-rank 皆免回盤）；
-  未命中才發出 SSD 讀取，讀回後連同鄰居與座標一併插入，並更新 CLOCK 計數。
-  查找走 shared-lock（允許並發讀者），插入以 non-blocking 的 try-lock 進行，搶不到即略過。}
+  \caption[Popularity-Adaptive Cache Manager]{Popularity-Adaptive Cache Manager (PAC). Nodes are assigned to shards using \texttt{node\_id \& (S$-$1)}. Each slot co-stores the neighbor list and the full-precision vector. A cache hit serves both traversal and re-ranking from DRAM; a miss issues an SSD read and inserts the returned neighbor list and coordinates if the shard lock is available. Lookups use shared locks, while insertions use non-blocking \texttt{try\_lock}.}
   \label{fig:bnc}
 \end{figure}
 
 %-------------------------------------------------------------
-\section{收斂感知早停（CA-ET）}
+\section{Convergence-Aware Early Termination (CA-ET)}
 \label{sec:et}
 %-------------------------------------------------------------
 
-早停的核心邏輯在 \S\ref{sec:mot-insight} 已引入；
-本節給出正式定義，並說明關鍵設計參數的含義。
-
-具體來說，在 beam search 每次展開前，我們取 retset 中 PQ 估距最小的未展開候選 $v_\text{best\text{-}unexp}$。
-這裡的 $d_\text{PQ}(q, \cdot)$ 是用記憶體中的 PQ 壓縮碼算出的\emph{近似}距離（即 DiskANN 導航所用的估距，見 \S\ref{sec:mot-insight}），計算只需純 CPU、約 10\,ns。
-我們把最佳未展開候選的估距 $d_\text{PQ}(q, v_\text{best\text{-}unexp})$，和用已讀回全精度向量算出的第 $2k$ 名候選精確距離 $d_\text{exact}(q, v_{2k})$ 相比：
+CA-ET adds a stopping rule inside DiskANN beam search.
+Before each expansion, PaceANN selects the unexpanded candidate with the smallest PQ-estimated distance, denoted $v_\text{best\text{-}unexp}$.
+It compares this estimate with the exact distance of the current $2k$-th candidate:
 
 \begin{equation}
   d_\text{PQ}(q,\, v_\text{best\text{-}unexp}) \;>\; \theta \cdot d_\text{exact}(q,\, v_{2k})
   \label{eq:et-gate}
 \end{equation}
 
-一旦成立，代表 frontier 中最有希望的候選、其樂觀估計都已經劣於現有第 $2k$ 名的實際距離，再展開下去幾乎不可能改變 top-$k$，於是終止並返回。
-這裡刻意用跨尺度的比較：待展開端用便宜的 PQ 估距、已收斂端用精確距離，並以第 $2k$ 名（而非第 $k$ 名）當門檻，替 recall 多留一點保守邊界。
-須強調 PQ 估距只是\emph{近似}、並非真實距離的嚴格下界，估計本身帶有量化誤差；門檻上乘以 $\theta>1$、以第 $2k$ 名為界、再加後述的 patience，正是為了吸收這個誤差、避免把估距當成可靠下界而誤停。
-$d_\text{exact}$ 用的是 traversal 過程中已經讀回的全精度向量（包含 PAC co-storage 命中的節點），所以整個判斷不會額外觸發任何 SSD 讀取。
+If the condition holds, the best remaining frontier candidate is unlikely to improve the current top-$k$ result, so the search can stop.
+The rule uses PQ distance on the frontier side because those codes are already in memory, and exact distance on the result side because expanded candidates have already fetched their full vectors.
+Therefore, the stopping check does not issue any additional SSD reads.
 
-門檻 $\theta$ 控制停止的保守程度。$\theta=1$ 時只要最佳候選的估距等於收斂端邊界就停，完全信任 PQ 近似、最為激進；$\theta\to\infty$ 則永不停止，等同原始 DiskANN；
-實務上取 $\theta$ 約 $1.1$ 到 $1.3$，替 PQ 量化誤差留一點容忍帶，在保守與省 hop 之間取得平衡。
-$\theta$ 的最優值和資料集的 PQ 壓縮誤差分布有關，不同維度與 segment 數的 PQ 設定下略有差異，其敏感性分析放在第~\ref{ch:method}~章。
-
-為了避免誤判，我們在停止條件上再加兩道安全網。單一 hop 的 PQ 估距可能因量化噪聲短暫越過門檻，
-而搜尋最初期候選還少、$d_\text{exact}(q, v_{2k})$ 也不穩定，這些都可能造成假陽性終止。
-第一道是 patience 計數：式~\eqref{eq:et-gate} 必須連續在 $P$ 個 hop 都成立才真正終止（典型 $P \approx 6$），藉此濾掉單跳噪聲的偽觸發。
-第二道是最小 hop 數 $t_\text{min}$：前 $t_\text{min}$ 個 hop 內一律不允許早停，確保 top-$k$ 累積到夠穩定後才開始判斷。
-這兩道防護都不依賴任何靜態快取層；收斂端的精確距離來自 traversal 已讀回、並由動態快取的 co-storage 保存的全精度向量。
+The threshold $\theta$ controls aggressiveness.
+Smaller values stop earlier but risk recall loss; larger values are more conservative and approach baseline DiskANN behavior.
+Because PQ distance is approximate rather than a true lower bound, PaceANN also uses two safeguards: a patience counter requiring the condition to hold for $P$ consecutive hops, and a minimum-hop threshold $t_\text{min}$ that disables early termination during the unstable beginning of search.
 
 %-------------------------------------------------------------
-\section{快取與早停的協同必要性}
+\section{Why Caching and Early Termination Must Be Co-designed}
 \label{sec:codesign}
 %-------------------------------------------------------------
 
-本節論證快取與 CA-ET 的協同不是「兩個獨立優化的疊加」，
-而是一個設計中的相互依賴關係：
-兩者缺少任何一個，另一個都會出現功能性的退化。
+Caching alone reduces some SSD reads, but it does not reduce the number of beam-search hops.
+Post-convergence hops can still consume DRAM bandwidth, lock operations, and CPU time even when they hit in cache.
+Early termination alone also has a weakness: without cached early hops, the current top-$k$ boundary is less stable, so the stopping rule must be conservative to avoid recall loss.
 
-先看只有快取、沒有早停的情況。若只部署動態快取，beam search 仍按固定 $L$ 跑完整段 hop 序列；
-命中快取的 hop 雖然把 SSD 讀取換成約 10\,ns 的 DRAM 存取、大幅降低 traversal 成本，但 hop 的數量本身並沒有減少。
-如 \S\ref{sec:mot-diminishing} 所述，$L=150$ 時約有近六成的 hop 在收斂後才執行；有了快取，這些無效 hop 仍會消耗 DRAM 頻寬、shard 鎖與 CPU 的 PQ 計算。
-在高並發下，這些原本被 SSD I/O 掩蓋的競爭，反而會在快取命中率提高後浮現成新的瓶頸。
-
-反過來，只有早停、沒有快取也不行。少了快取保護前期 hop，搜尋剛起步時 top-$k$ 覆蓋不足，
-用來比較的收斂端距離不穩定，早停就容易假陽性，逼得 $\theta$ 必須設得很保守。
-在無快取的冷啟動下，即使 $\theta=1.2$ 也可能讓 recall 損失超出可接受範圍，只好把 $\theta$ 調到 1.4 以上；
-但這樣一來早停幾乎不觸發，省下的 hop 有限，相較 baseline 幾乎沒有改善。
-
-兩者一起用時就互補了：
-
-\begin{enumerate}
-  \item 動態快取（含 BFS 種子與 demand-fill 累積的熱點）使前期 top-$k$ 以 DRAM 速度快速填充，
-    並透過 co-storage 直接提供收斂端所需的\emph{精確}距離 $d_\text{exact}$。
-  \item top-$k$ 穩定後（通常在 hop 5\textasciitilde 6），$d_\text{exact}(q, v_{2k})$ 可靠，
-    CA-ET 的跨尺度門檻得以在較小的 $\theta$ 下穩定觸發。
-  \item CA-ET 在收斂點停止，消除後續的無效 hop——
-    這些 hop 即使在快取命中的情況下也是純粹的 DRAM 與 CPU 浪費。
-  \item 快取在收斂區持續命中，使 CA-ET 之前的有效 hop 更快完成，進一步縮短整體延遲。
-\end{enumerate}
-
-換言之，快取把每個有效 hop 的成本壓到 DRAM 量級並穩定前期 top-$k$，
-CA-ET 則直接砍掉收斂後那段連快取也省不掉的無效 hop；
-兩者作用在服務路徑的不同環節，缺一則另一半的效益無法完全兌現。
-
-這兩個削減最終都收斂到同一個效果：\textbf{降低進入共享 SSD 佇列的請求量}。
-第~\ref{ch:motivation}~章的 fio 量測與 Little's Law（$L=\lambda W$，$L$ 為佇列中同時在途的請求數、$\lambda$ 為讀取到達率、$W$ 為單筆延遲）指出，
-在高並發服務下 SSD 一旦越過 knee，每筆讀取的延遲 $W$ 便由佇列深度 $L$（即第~\ref{ch:motivation}~章的有效佇列深度 $D_\text{eff}$）主導——工作點越深入飽和段，$W$ 增長得越快。
-PaceANN 的兩個機制正是從\emph{到達率}這一端介入：PAC 命中讓 traversal 與 re-rank 的節點完全不發出 SSD 讀取，
-CA-ET 則減少每筆查詢的 hop 數，兩者相加使單位時間發往 SSD 的讀取到達率 $\lambda$ 下降。
-在裝置服務率固定下，較低的 $\lambda$ 直接壓低佇列深度 $L$，把實際工作點從 fio 曲線的飽和段拉回 knee 附近，
-$W$ 隨之回落，於是尾延遲下降、QPS 上升。這也是為何兩機制的增益在高並發下最為顯著：
-低並發時 SSD 佇列本就未飽和（$W$ 平坦），削減到達率的邊際效益有限；唯有當佇列成為瓶頸，
-把 $\lambda$ 壓回 knee 才直接兌現成延遲與吞吐量的改善。
-
-值得一提的是，上述佇列緩解完全來自兩個主機制對\emph{請求量}的削減，
-而\emph{不依賴}任何顯式的 NVMe 佇列深度限制器——把讀取到達率 $\lambda$ 壓下來這件事本身，就足以讓工作點停在 knee 附近，
-無須在搜尋寬度上再加人為節流。
-
-這條協同必要性的論點會在第~\ref{ch:evaluation}~章以拆解各機制的 ablation 實驗（\S\ref{sec:eval-ablation}）直接驗證。
+When both mechanisms are enabled, PAC helps the early search state stabilize quickly and provides exact vectors for CA-ET.
+CA-ET then removes the remaining post-convergence work.
+The combined effect is a lower SSD read arrival rate, which reduces queue depth and improves throughput and tail latency under high concurrency.
 
 %-------------------------------------------------------------
-\section{並發服務架構}
+\section{Concurrent Serving Architecture}
 \label{sec:server}
 %-------------------------------------------------------------
 
-PaceANN server 採用固定執行緒池：$T$ 個 worker thread 各自持有一個 TCP socket 監聽，
-並各有一份 thread-local 的暫存空間（存放 retset、visited bitmap 等 per-query 狀態），避免跨查詢的狀態污染。
-連線被接受後，由空閒的 worker 跑完整段搜尋流程再關閉連線，不需要跨 thread 的工作竊取或 continuation。
-
-在此並發模型下，當 $T$ 個 thread 同時搜尋、每 hop 各發 $W$ 個 SSD 讀取時，快取未命中情況下的聚合佇列深度 $D_\text{eff}$ 可達 $T \times W$——
-這正是 \S\ref{sec:codesign} 中 PAC 與 CA-ET 透過削減請求量所要壓回 knee 的那個量。
-
-本節描述的執行緒池與請求協定，同時也是所有受測系統共用的並發服務測試框架；
-其請求格式、計時方式與各系統的公平配置屬於量測層面，統一在第~\ref{ch:evaluation}~章的量測方法論（\S\ref{sec:measurement}）定義。
-
-%-------------------------------------------------------------
-\section{設計摘要}
-\label{sec:design-summary}
-%-------------------------------------------------------------
-
-表~\ref{tab:design-summary} 彙整 PaceANN 各元件的設計選擇與理論依據：
-
-\begin{table}[h]
-\centering
-\caption{PaceANN 元件設計摘要}
-\label{tab:design-summary}
-\begin{tabular}{p{3.2cm} p{3.8cm} p{5.5cm}}
-\toprule
-元件 & 設計選擇 & 理論依據 \\
-\midrule
-動態快取冷啟動 & BFS-from-medoid 種子（分片均等預算） & 入口鄰域造訪頻率最高；僅作冷啟動 \\
-快取替換策略 & CLOCK（$S=2^{\lceil\log_2 T\rceil}$ shard，遮罩定址） & 高並發讀取下 CLOCK > LRU；shard 數對齊 thread 數、寫入非阻塞 \\
-快取座標共存 & 鄰居 ID 與全精度向量共存 & 消除 re-rank 的 SSD I/O，並供 CA-ET 精確距離 \\
-CA-ET 停止條件 & 跨尺度精確門檻 $d_\text{PQ} > \theta\, d_\text{exact}(2k)$ & 零額外 I/O 的收斂信號 \\
-CA-ET 安全網 & patience $P$ + 最小 hop $t_\text{min}$ & 防止單跳噪聲與 top-$k$ 未穩定的假陽性 \\
-\bottomrule
-\end{tabular}
-\end{table}
+The PaceANN server uses a fixed worker-thread pool.
+Each worker keeps thread-local per-query state such as the retset and visited bitmap.
+After receiving a query, a worker runs the full search and returns the result.
+This same client/server measurement framework is used for all evaluated systems, while each system keeps its native server-side I/O implementation.

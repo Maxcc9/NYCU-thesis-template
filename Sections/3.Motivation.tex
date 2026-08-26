@@ -1,84 +1,57 @@
 %=============================================================
-\chapter{研究動機}
+\chapter{Motivation}
 \label{ch:motivation}
 %=============================================================
 
-% ─── 章節破題 ───────────────────────────────────────────────
-近年企業基於資料隱私與成本考量，傾向將 RAG（retrieval-augmented generation）等 agent 服務部署於\textbf{地端}（on-premise）的單機或小型叢集，而非雲端大型伺服器。
-在這類部署中，向量索引往往大到無法完整載入記憶體，必須置於本地 SSD；
-與此同時，多個使用者透過各自的 agent 併發存取同一套硬體，而每一輪對話又可能觸發多次檢索，
-使系統在短時間內湧入大量並發的 ANN 查詢。
-這正是本研究關注的情境：受限的地端硬體、共享的單顆 SSD，以及由多用戶 agent 產生的高並發檢索負載。
+This thesis focuses on disk-based ANNS under concurrent on-premise serving.
+In this setting, the vector index is too large to fit fully in DRAM and must be stored on SSD, while many users and agents issue retrieval requests to the same machine.
+The bottleneck is therefore not only the latency of a single SSD read, but the interaction between random I/O, high concurrency, and fixed-budget graph search.
 
-在此情境下，大規模磁碟式圖 ANNS 的效能瓶頸，
-表面上是「SSD 隨機讀取太慢」，
-實際上是三層相互疊加的問題：
-硬體佇列對並發 I/O 的非線性懲罰、
-演算法對「已收斂的搜尋」仍持續發出無效 I/O、
-以及兩者在高並發搜尋下的交叉放大效應。
-以下將逐層剖析這三個問題，說明它們如何交互作用，以及 PaceANN 設計的必要性。
+PaceANN is motivated by three observations.
+First, NVMe latency grows nonlinearly once the effective queue depth passes the device's knee.
+Second, DiskANN beam search often continues expanding after the top-$k$ result has already converged.
+Third, these unnecessary reads amplify tail latency because all concurrent queries share the same SSD queue.
 
 %-------------------------------------------------------------
-\section{NVMe SSD 的非線性佇列延遲}
+\section{Nonlinear Queueing Latency on NVMe SSDs}
 \label{sec:mot-ssd}
 %-------------------------------------------------------------
 
-磁碟式 ANN 的查詢成本主要由 SSD 的隨機讀取主導，近期的量測研究亦系統性地刻畫了這類工作負載在效能、成本與 I/O 上的特性\cite{ren2025storageann}。
-而 NVMe SSD 的隨機讀取延遲並非固定常數，而是佇列深度（queue depth, QD）的函數。
-圖~\ref{fig:fio-qd} 以 \texttt{fio} 對本實驗 NVMe 裝置做單執行緒的 4\,KB 隨機讀取掃描
-（\texttt{O\_DIRECT}，佇列深度自 1 掃到 512），並分別記錄 p50 與 p99 延遲。
-為了確認觀察到的現象不是某個 I/O 介面特有的行為，我們用 Linux 的兩種非同步 I/O 提交介面
-\texttt{libaio}（傳統的 \texttt{aio} 系統呼叫）與 \texttt{io\_uring}（近年的環狀佇列介面）各測一次。
-兩者在整段掃描中幾乎重合，顯示延遲增長來自裝置內部的佇列行為，而非某一種提交介面的假影。
+Disk-based ANN search is dominated by random SSD reads\cite{ren2025storageann}.
+Figure~\ref{fig:fio-qd} shows a 4\,KB random-read \texttt{fio} scan on our NVMe SSD using both \texttt{libaio} and \texttt{io\_uring}.
+The two interfaces produce nearly identical curves, indicating that the main effect comes from the device queue rather than the submission API.
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{img/fio_qd_3panel.pdf}
-  \caption{本實驗 NVMe 裝置在單執行緒 4\,KB \texttt{O\_DIRECT} 隨機讀下，
-  p50、p99 延遲與 IOPS（由左至右）對佇列深度的變化，並比較 \texttt{io\_uring} 與 \texttt{libaio}。
-  延遲在 QD~$\leq$~16（虛線）前持平、之後急遽上升；IOPS 則在 QD~$\approx$~256 後增長大幅趨緩、接近飽和。}
+  \caption[NVMe SSD latency and IOPS versus queue depth]{p50 latency, p99 latency, and IOPS of our NVMe SSD under single-threaded 4\,KB \texttt{O\_DIRECT} random reads as queue depth increases, comparing \texttt{io\_uring} and \texttt{libaio}. Latency remains nearly flat until QD~$\leq$~16 (dashed line), then rises sharply. IOPS growth slows substantially after QD~$\approx$~256 and approaches saturation.}
   \label{fig:fio-qd}
 \end{figure}
 
-延遲在 QD~$\leq$~16 之前基本持平（p50 約 40\,$\mu$s），超過此點後隨佇列深度急遽上升，
-到 QD=512 時已攀升約一個數量級（p50/p99 達數百 $\mu$s 至毫秒級）。
-反觀 IOPS（圖右）在 QD~$\approx$~256 之後增長便大幅趨緩、接近飽和。
-兩條曲線合起來點出關鍵：過了 knee，裝置吞吐已經觸頂，再增加在制請求並不會讓它做得更快，
-多出來的延遲幾乎全是\textbf{排隊等待}——請求卡在共享佇列裡等前面的讀取完成，而非裝置本身變慢。
-也就是說，knee 之後 SSD 的延遲主要由佇列的排隊行為決定，而不再是裝置的服務時間；
-一旦在制請求數超過 knee，每多發一個讀取都會直接轉化為所有並發請求的額外等待。
-
-這一點在並發服務下尤其關鍵。每個 worker thread 各自向同一顆 NVMe 裝置提交請求，
-裝置看到的有效佇列深度是各執行緒在制請求量的總和 $D_\text{eff} = \sum_{t} D_t$。
-承上，延遲增長只取決於 $D_\text{eff}$、而與請求來自單執行緒或多執行緒無關，故前述 knee 同樣適用於這個聚合佇列深度。
-以 32 個 thread、各自 beam width 8 估算，最壞情況下約有 256 個請求同時在制，遠超 QD~$\approx$~16 的 knee；
-以 Little's Law（$L = \lambda W$）觀之，在服務率有限時在制請求數增加會直接拉長每個請求的期望等待。
-也就是說，每一個不必要發出的 SSD 讀取都會推高 $D_\text{eff}$、延長系統中所有並發讀取的等待；
-在高並發下，這個代價由所有查詢共同承擔——這也指出改善方向：把 $D_\text{eff}$ 控制在 knee 附近，而非任其成長。
+Latency stays almost flat until QD~$\leq$~16, then rises sharply, while IOPS approaches saturation around QD~$\approx$~256.
+After the knee, extra in-flight requests mainly add queueing delay rather than increasing useful throughput.
+In a concurrent server, the SSD observes the aggregate queue depth across workers, $D_\text{eff}=\sum_t D_t$.
+With 32 workers and beam width 8, the worst case can reach about 256 in-flight reads, far beyond the latency knee.
+Thus, reducing unnecessary reads is a direct way to lower queueing delay for all queries.
 
 %-------------------------------------------------------------
-\section{Beam Search 中的 I/O 邊際效益遞減現象}
+\section{Diminishing I/O Benefit in Beam Search}
 \label{sec:mot-diminishing}
 %-------------------------------------------------------------
 
-DiskANN beam search 的資訊增益並非均勻分布在所有 hop 上。
-直觀上，初期 hop 從 medoid 出發，每次展開都能接觸到距離 query 明顯更近的節點，top-$k$ 快速收斂；
-後期 hop 的探索空間已高度重疊，展開新節點替換 top-$k$ 的機率急遽下降。
-
-為了量化這個現象，我們在 \textbf{SPACEV100M}（1 億筆 int8 向量）上做了一個 oracle early termination 分析：
-對每筆查詢以完整搜尋預算執行 beam search，並在每個 hop 結束後記下當下的 top-$k$；
-再用 ground truth 找出最早達到該次搜尋最終 recall 的那個 hop，當作 oracle 停止點 $h^*$。
-$h^*$ 之後的 hop 即為收斂後的無效工作，其比例為 $(\bar h_\text{total}-\bar h^*)/\bar h_\text{total}$。
-表~\ref{tab:oracle-summary} 呈現在 beam width $W = 8$ 下、隨搜尋列表長度 $L$ 變化的結果。
+DiskANN beam search gains most of its useful information in the early hops.
+Later hops often explore nodes near the already discovered neighborhood and rarely change the final top-$k$ result.
+To quantify this, we run an oracle early-termination analysis on SPACEV100M.
+For each query, we record the top-$k$ after every hop and find the earliest hop $h^*$ that reaches the final recall of the full search.
+Hops after $h^*$ are treated as wasted post-convergence work.
 
 \begin{table}[h]
 \centering
-\caption{Oracle 早停分析：SPACEV100M 上不同 $L$ 的 hop 效率（$W = 8$，$K = 10$）。
-所有欄位均為 query set 上的逐查詢平均。}
+\caption[Oracle early-termination analysis on SPACEV100M]{Oracle early-termination analysis on SPACEV100M for different $L$ values ($W = 8$, $K = 10$). All columns report per-query averages over the query set.}
 \label{tab:oracle-summary}
 \begin{tabular}{rrrrr}
 \hline
-$L$ & 平均實際 hop $\bar h_\text{total}$ & 平均 oracle hop $\bar h^*$ & 無效 hop\,\% & Recall@10 \\
+$L$ & Mean actual hops $\bar h_\text{total}$ & Mean oracle hops $\bar h^*$ & Wasted hops\,\% & Recall@10 \\
 \hline
  20 &  9.2 &  8.6 &  6.8\% & 0.897 \\
  60 & 13.6 &  9.3 & 31.5\% & 0.955 \\
@@ -89,72 +62,42 @@ $L$ & 平均實際 hop $\bar h_\text{total}$ & 平均 oracle hop $\bar h^*$ & �
 \end{tabular}
 \end{table}
 
-結果呈現一個結構性的問題：\emph{要的 recall 越高，浪費越嚴重}。
-在只需中等 recall 的小 $L$（$L=20$，recall 0.897）時，無效 hop 僅約 7\%；
-但要把 recall 推到 0.977 就得用 $L=150$，此時平均每筆查詢跑 24.4 個 hop、oracle 卻只需 10.3 個，
-\textbf{57.8\% 的 hop 都在收斂後才執行}；若再往 $L=200$（recall 0.981）推，無效比例升到 65\%。
-而每一個無效 hop 仍會向 SSD 發出最多 $W$ 個讀取請求——這些 I/O 對 recall 毫無貢獻，卻實實在在地佔用共享佇列。
+The wasted fraction increases as the target recall rises.
+At $L=150$, the search executes 24.4 hops on average, while the oracle needs only 10.3 hops to reach the same final recall.
+This means 57.8\% of hops occur after convergence.
+At $L=200$, the wasted fraction reaches 65.1\%.
+Because each hop can issue up to $W$ SSD reads, post-convergence expansion creates substantial avoidable I/O.
 
-這個浪費也不是某個 beam width 的假影。固定 $L=150$、改變 $W$，無效比例從 $W=4$ 的 66.9\%、
-$W=8$ 的 57.8\%、到 $W=16$ 仍有 44.4\%（三者 recall 皆約 0.976--0.979）：
-加大 beam width 雖能以較少 hop 收斂、把無效比例壓低，但收斂後的冗餘展開始終佔四成以上。
-
-固定 $L$ 的設計還有一個更根本的缺陷：它對異質的查詢難度系統性地誤配。
-落在高密度聚集區的查詢，答案在局部鄰域裡幾個 hop 就找得到；而位於分布稀疏邊緣、或多個聚集區交界的查詢，才真正需要較大的 $L$ 保護。
-單一的全域 $L$ 只能遷就最難的少數查詢，於是讓大多數容易的查詢承擔了「為困難查詢買保險」的成本——
-這正是需要\emph{逐查詢}自適應停止、而非全域固定預算的原因。
-
-這種收斂並非 SPACEV 這個資料集的特例，而是\emph{可導覽圖}（navigable graph）索引的結構性特性。
-這類索引在建構時，都以某種剪枝或鄰居選擇的啟發式維持短路徑性質（例如 DiskANN 的 Vamana 圖採用 robust pruning~\cite{subramanya2019diskann}，HNSW 則用其鄰居選擇啟發式），
-讓 beam search 前幾個 hop 就能快速接近 query 的 Voronoi 鄰域；
-一旦進入鄰域，後續 hop 探索的多半是鄰域內部的節點，對 top-$k$ 的邊際貢獻趨近於零。
-既然這個現象源自圖的建構方式、而非特定資料分布，I/O 的邊際效益遞減便會跨資料集、也跨圖索引種類（如 Vamana、HNSW）地普遍存在。
+This also shows why a single global $L$ is inefficient.
+Easy queries converge quickly, while difficult queries need a larger budget.
+Using one fixed budget forces easy queries to pay for the worst cases.
+A per-query stopping rule is therefore more appropriate for concurrent serving.
 
 %-------------------------------------------------------------
-\section{無效 I/O 在並發 Server 環境的放大機制}
+\section{Amplification of Ineffective I/O in Concurrent Servers}
 \label{sec:mot-tail}
 %-------------------------------------------------------------
 
-前兩節分別揭示了 SSD 的佇列非線性懲罰，
-以及 beam search 中大量無效 hop 的存在。
-兩者在並發服務的高並發環境中形成交叉放大：
-無效 hop 的 I/O 需求持續維持高 $D_\text{eff}$，
-而高 $D_\text{eff}$ 使每個 SSD 讀取（包括有效 hop 的讀取）延遲上升，
-進一步惡化尾延遲。
+The SSD queueing effect and the wasted-hop effect reinforce each other.
+I/O from post-convergence hops keeps $D_\text{eff}$ high, and high $D_\text{eff}$ increases the latency of both useful and useless reads.
+This is especially harmful for tail latency, because a few queries can encounter congestion peaks and delay the workers serving later requests\cite{dean2013tail}.
 
-把這個問題量化一下。若系統有 $T$ 個 worker thread、各服務一個並發查詢，而每筆查詢的無效 hop 比例為 $\rho_w$（SPACEV100M、$W=8$、$L=150$ 時約 $0.58$），
-那麼在有效佇列深度 $D_\text{eff} = T \cdot W_\text{bw}$ 之中，大約有 $\rho_w$ 比例的請求是可以被消除的浪費。
-以 32 個 thread、beam width 8 估算，256 個並發 I/O 裡約有 148 個來自無效 hop；把它們消掉，有效佇列深度可從 256 降到約 108，
-使 $D_\text{eff}$ 減半以上、大幅朝 QD~$\approx$~16 的 knee（圖~\ref{fig:fio-qd}）方向回落，回到延遲曲線斜率明顯較緩的一側。
-
-在受 SLA 約束的線上服務中，尾延遲往往比平均延遲更能決定服務品質\cite{dean2013tail}；而尾延遲（P99/P999）在並發服務下又比平均值更脆弱，這來自兩個交疊的效應。
-一方面，佇列競爭本身帶有隨機性：各 thread 的 hop 並不同步，少數查詢的 SSD 讀取剛好集中在壅塞高峰，等待時間遠超平均，形成長尾。
-另一方面，等待效應會串聯：一筆查詢的有效 hop 若被背景的無效 I/O 拖慢而延後完成，對應的 thread 就無法及時服務後面排隊的查詢，延遲因此往後傳播。
-這兩點讓 P99 對 $D_\text{eff}$ 的敏感度高於平均延遲，在高並發下表現為 P99/mean 比值的急劇上升。
-因此，有效管理 $D_\text{eff}$ 是改善 P99 的必要條件，而不只是一個加速手段。
-
-現有方法多半沒有從這個角度切入。Starling~\cite{wang2024starling} 以 page grouping 提升每次 I/O 的資訊密度，讓較少的 hop 就能達到相同 recall，
-但它改善的是每個 hop 的 I/O 效率，並不偵測、也不終止收斂後的無效 hop，$\rho_w$ 的問題依舊存在。
-PipeANN~\cite{osdi25pipeann} 以 pipelined async I/O 重疊計算與 I/O 來隱藏部分延遲，但總 I/O 量沒有減少，佇列一旦飽和效益就有限。
-這些方法都在優化「每個 I/O 的成本」，而真正的問題其實是「不必要的 I/O 根本不該被發出」。
+Existing systems optimize different parts of this cost.
+Starling improves the usefulness of each page read through layout changes\cite{wang2024starling}, while PipeANN overlaps computation and I/O to hide part of single-query latency\cite{osdi25pipeann}.
+PaceANN instead reduces the number of reads that enter the shared SSD queue.
+This is the main lever for improving throughput and P99 latency when the SSD is already operating beyond its queue-depth knee.
 
 %-------------------------------------------------------------
-\section{核心洞察：收斂可在零 I/O 代價下偵測}
+\section{Key Insight: Convergence Can Be Detected Without Extra I/O}
 \label{sec:mot-insight}
 %-------------------------------------------------------------
 
-上述分析的出口，在於能否在搜尋過程中即時判斷某筆查詢的 top-$k$ 是否已收斂——而且這個判斷本身不能再引入額外的 SSD I/O，否則只是把一種負擔換成另一種。
+The key requirement is to detect convergence without issuing more SSD reads.
+DiskANN already keeps PQ-compressed codes in memory, so it can estimate distances to unexpanded candidates using only CPU computation.
+For expanded candidates, the full-precision vectors have already been read, so exact distances are available.
+Before each hop, PaceANN can compare the best unexpanded candidate's PQ estimate with the exact-distance boundary of the current result set.
+If the frontier is unlikely to improve the top-$k$, the query can stop.
 
-關鍵觀察是：判斷收斂所需的資訊其實都已經在 DRAM 裡。DiskANN 在記憶體中保有所有節點的 PQ 壓縮碼，可對尚未讀取鄰居的候選快速估距（純 CPU、約 10\,ns，比一次 SSD 讀取快四個數量級）；而那些已經展開、讀回全精度向量的候選，則可直接算出精確距離。
-於是每個 hop 之前，我們就能用一個「最有希望的未展開候選之樂觀估計」對「目前已收斂結果」的比較，來判斷是否還值得繼續展開——若連樂觀估計都已劣於現有結果，繼續下去幾乎不可能改變 top-$k$，即可停止，且全程不碰 SSD。這條早停的正式門檻與防止誤判的安全網，將在第~\ref{ch:arch}~章定義。
-
-這個判斷有一個前提：作為比較基準的 top-$k$ 必須夠穩定。搜尋最初期（beam search 剛從 medoid 出發、候選還少）最難滿足，覆蓋不足時容易誤判而提早停止。
-把高頻節點留在快取正好補上這一塊——若前幾個 hop 以 DRAM 速度完成，top-$k$ 能更快建立足夠覆蓋，停止判斷也更可靠。
-這也是為什麼快取與早停不是兩個各自獨立的最佳化，而是\emph{彼此需要}的協同設計。
-
-綜合以上，PaceANN 的設計方向可歸納為三個目標：
-\begin{enumerate}
-  \item 在不增加 SSD I/O 的前提下，偵測每筆查詢的 top-$k$ 是否已收斂，並在收斂後停止；
-  \item 在高並發下，盡量減少進入 SSD 的總 I/O 量，把有效佇列深度 $D_\text{eff}$ 壓回 knee 附近；
-  \item 在不犧牲 recall 的前提下，改善 P99/P999。
-\end{enumerate}
+This signal is more reliable once the early search state has enough coverage.
+PAC helps by keeping frequently visited early nodes in DRAM, while CA-ET removes later hops after convergence.
+The two mechanisms therefore support the same goal: reduce avoidable SSD I/O without changing the underlying DiskANN index.

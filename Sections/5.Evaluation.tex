@@ -4,53 +4,49 @@
 \label{ch:evaluation}
 %=============================================================
 
-% ─── 章節破題 ───────────────────────────────────────────────
-本章評估 PaceANN 的兩個機制在並發服務下的效果：先交代實驗設計與量測協定，再逐一呈現各項結果，
-檢驗第~\ref{ch:motivation}~章的分析所引出的設計主張——SSD 佇列在高並發下主導延遲、beam search 大量 hop 在收斂後才執行、以及各查詢的收斂熱區隨分布漂移。
-由於評估涉及三個在架構上有本質差異的系統，公平性尤為關鍵：所有對照都必須在同等資源限制下進行，
-本章以獨立節次（\S\ref{sec:fairness}）專門處理記憶體預算的正規化。
+This chapter evaluates PaceANN under concurrent serving.
+The goal is to measure whether PAC and CA-ET reduce SSD I/O and improve throughput at comparable recall under equal memory budgets.
 
 %-------------------------------------------------------------
-\section{實驗環境}
+\section{Experimental Environment}
 \label{sec:testbed}
 %-------------------------------------------------------------
 
 \begin{table}[h]
 \centering
-\caption{實驗硬體規格}
+\caption[Experimental hardware]{Experimental hardware configuration}
 \label{tab:hardware}
 \begin{tabular}{ll}
 \toprule
-元件 & 規格 \\
+Component & Specification \\
 \midrule
-CPU & Intel Core i9-14900（24 核心 / 32 執行緒，8P+16E，Raptor Lake；無 AVX-512） \\
+CPU & Intel Core i9-14900 (24 cores / 32 threads, 8P+16E, Raptor Lake; no AVX-512) \\
 DRAM & 128\,GB \\
-NVMe SSD & Kingston SKC3000D2048G，2.05\,TB，PCIe NVMe \\
-作業系統 & Ubuntu 24.04.1 LTS（kernel 7.0.0-30-generic） \\
-非同步 I/O & \texttt{libaio}（\texttt{O\_DIRECT | O\_RDONLY}） \\
+NVMe SSD & Kingston SKC3000D2048G, 2.05\,TB, PCIe NVMe \\
+Operating system & Ubuntu 24.04.1 LTS (kernel 7.0.0-30-generic) \\
+Asynchronous I/O & \texttt{libaio} (\texttt{O\_DIRECT | O\_RDONLY}) \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-所有實驗均在同一台機器上進行，避免跨機器的硬體差異影響可重現性。
-Worker thread 數固定為 $T = 32$（與 CPU 的 32 個邏輯執行緒一致，避免過度訂購）。
-SSD 在實驗前未執行其他 I/O 密集工作，確保快取狀態一致。
+All experiments run on the same machine with $T=32$ worker threads.
+No other I/O-intensive workload is run during measurement.
 
 %-------------------------------------------------------------
-\section{資料集與索引設定}
+\section{Datasets and Index Configuration}
 \label{sec:dataset}
 %-------------------------------------------------------------
 
-本研究使用三個 100M 級的磁碟式資料集，均取自 Big-ANN-Benchmarks 億級標竿測試，規格列於表~\ref{tab:datasets}。
-選 100M 這個規模，是因為它夠大、在有限記憶體預算下 SSD 儲存無可避免，正好對應本研究關注的磁碟式情境。
+We evaluate three 100M-scale datasets from Big-ANN-Benchmarks, shown in Table~\ref{tab:datasets}.
+All measurements use the official 10,000-query set and top-10 exact nearest neighbors as ground truth.
 
 \begin{table}[h]
 \centering
-\caption{評估使用的資料集}
+\caption[Evaluation datasets]{Datasets used in the evaluation}
 \label{tab:datasets}
 \begin{tabular}{lccc}
 \toprule
-資料集 & 型別 & 維度 & 原始大小 \\
+Dataset & Type & Dimension & Raw size \\
 \midrule
 SPACEV100M & int8   & 100 & 10\,GB   \\
 SIFT100M   & uint8  & 128 & 12.8\,GB \\
@@ -59,182 +55,124 @@ DEEP100M   & float  & 96  & 38.4\,GB \\
 \end{tabular}
 \end{table}
 
-主要實驗以 SPACEV100M 為主結果（i.i.d.）：它取自 Microsoft Bing 搜尋引擎的實際查詢向量，int8 型別與生產環境的檢索向量特徵一致，
-且是三者中最常見於社群交叉比對的設定。SIFT100M、DEEP100M 則用於複製驗證，確認主要結果能否推廣到不同型別（uint8／float）與維度的資料集。
-查詢集一律使用官方的 10,000 筆 query、以 top-10 精確最近鄰為 ground truth；所有量測都用完整 10,000 筆、不做截斷，以確保 recall 估計的統計穩定。
-
-DiskANN 與 PaceANN 共用同一份 Vamana 索引，以最大出度 $R=96$、建構搜尋列表 $L_\text{build}=120$ 建構；
-$R=96$ 是圖密度與 I/O 效率之間的折衷——sector 大小固定，$R$ 越大每次要讀的 sector 越多，$R=128$ 雖連接更豐富但可能拖低效率。
-PipeANN 以其原論文建議的 $R=96$、$L_\text{build}=128$ 建構，沿用原設定以維持與其論文比較時的忠實度。
-Starling 則採用自己的設計：圖度數 $R=31$（明顯低於前兩者，是其架構本身的選擇）、$L_\text{build}=128$，並額外做 block shuffling 把相鄰節點打包到同一磁碟頁面；
-其 navigation graph（mem-index）另以 $R_\text{mem}=20$、$L_\text{mem}=128$ 建構，涵蓋約 0.1\% 的隨機採樣節點。
-各系統圖的建構細節不同，是因為三者索引格式互不相容、各自照原論文的推薦設定建構，這是既有評估方法下的標準做法（各系統跑在各自最佳配置），我們在呈現比較時都會標明。
+DiskANN and PaceANN share the same Vamana index with maximum degree $R=96$ and construction list $L_\text{build}=120$.
+PipeANN uses its recommended configuration, $R=96$ and $L_\text{build}=128$.
+Starling uses its own layout and navigation-graph configuration: graph degree $R=31$, $L_\text{build}=128$, and a mem-index built with $R_\text{mem}=20$ and $L_\text{mem}=128$.
+These settings follow each system's intended index format and recommended configuration.
 
 %-------------------------------------------------------------
-\section{公平性協定：記憶體預算正規化}
+\section{Fairness Protocol: Memory-Budget Normalization}
 \label{sec:fairness}
 %-------------------------------------------------------------
 
-PaceANN 與 Starling 在架構上的根本差異在於：
+The systems have different minimum memory requirements.
+DiskANN and PaceANN mainly require the PQ-compressed vectors at startup; on SPACEV100M this is about 3.2\,GB.
+Starling must additionally load layout metadata and its navigation graph, giving it a minimum RSS of about 3.07\,GB.
+To compare equal hardware cost, we set a fixed total memory budget that includes PQ tables, metadata, and caches.
+For the 100M experiments, this budget is 8\,GB, and all systems stay within this limit.
 
-\begin{itemize}
-  \item DiskANN / PaceANN 的最小啟動記憶體僅需 PQ 壓縮向量（SPACEV100M 為 1 億點 $\times$ 32\,bytes/vec $=$ 3.2\,GB），
-    剩餘預算可彈性分配給 PAC。
-  \item Starling 在啟動時強制載入 \texttt{partition.bin}（827\,MB）到兩個記憶體結構
-    （\texttt{id2page\_} 約 400\,MB、\texttt{gp\_layout\_} 約 400\,MB），
-    加上 navigation graph（約 31\,MB），
-    最小 RSS 固定為 \textbf{3.07\,GB}，無法降低。
-\end{itemize}
-
-若直接以 Starling 的最小 RSS（3\,GB）作為統一預算，PaceANN 的快取空間會被壓縮到不合理的下限；
-若各系統各自取最優絕對預算，則資源投入不對等，比較失去意義。
-
-因此本研究以固定的總記憶體預算（涵蓋 PQ 與快取）作為基準，各系統用滿此上限但不超過，確保比較的是相同硬體成本下的效能。
-預算訂為 PQ 壓縮向量表大小的兩倍（$\text{budget} \approx 2\times\text{PQ}_{\text{floor}}$），
-在 SPACEV100M（PQ\_floor $=3.2$\,GB）上為 \textbf{8\,GB}，各系統實測 RSS 落在 7.44–7.96\,GB 之間（見 \S\ref{sec:eval-compare} 的結果）。
-
-量測一律冷啟動、不做暖機：server 全新啟動後直接以原始查詢集完整跑一次，不重複、不循環。
-若以重複查詢預熱，PaceANN 的快取命中率會被人為灌高、I/O 趨近於零，量到的就不是真實流量下的效能；
-快取僅透過 BFS 冷啟動種子與查詢過程中的 demand-fill 自然累積。
-
-執行緒方面，所有系統都設 $T = 32$ 個 worker thread，beam width 依各系統的最優設定
-（DiskANN 與 PaceANN 用 $W = 8$，Starling 用 $W = 4$，與其原論文一致）。
+All measurements are cold-start runs.
+The query set is processed once without warm-up or repetition, so PaceANN's cache can improve only through BFS seeding and demand fill during the measured run.
+DiskANN and PaceANN use beam width $W=8$; Starling uses $W=4$, consistent with its original setting.
 
 %-------------------------------------------------------------
-\section{量測方法論}
+\section{Measurement Methodology}
 \label{sec:measurement}
 %-------------------------------------------------------------
 
-本研究所稱的\emph{並發服務}（concurrent serving，亦稱 server mode）並非 DiskANN 內建功能，
-而是我們為評估並發服務情境所實作的\textbf{共用測試客戶端}：以並發度 $C$ 控制同時在制的查詢數，
-透過 TCP 向各系統的原生 server 發送查詢，並以相同的協定格式與計時方式量測 QPS 與延遲，確保這一層對四個受測系統一致。
-但各系統 server 端的並發引擎本身是各自的原生實作，並不強制統一：
-DiskANN／Starling／PaceANN 採固定 $T=32$ 個阻塞式 I/O worker thread，可安全超額訂閱到少數核心；
-PipeANN 則是 io\_uring SQPOLL 架構，執行緒與實體核心的對應方式不同，因此其公平並發點也不同
-（詳見 \S\ref{sec:eval-compare} 的討論）。
+Concurrent serving is measured with a common TCP client that controls the number of in-flight queries $C$.
+The client sends queries to each system's native server and measures QPS using wall-clock time.
+Server-side latency is measured from the moment a worker receives a complete query packet until it sends the result, excluding TCP setup and transfer.
 
-延遲數字（平均、P50、P99、P999）都在 server 端計算，時間戳從 worker thread 完整收到查詢封包後開始、到送出結果前結束，
-排除 TCP 建連與網路傳輸，讓延遲只反映搜尋演算法本身的成本。QPS 則在 client 端以牆鐘時間計算，從發出第一筆查詢到收到最後一筆回應，反映端到端的吞吐量。
+We report results at $C=16$ and $C=32$.
+$C=16$ is the main comparison point because it is also PipeANN's fair operating point.
+PipeANN's \texttt{pipe\_search} uses \texttt{io\_uring} SQPOLL and busy polling, so 16 search threads plus 16 SQPOLL threads fill the 32 logical CPU threads.
+$C=32$ is used to show the behavior of the blocking-I/O systems under heavier concurrency.
 
-主要結果以並發度 $C \in \{16, 32\}$ 呈現：$C=16$ 是中等並發的典型 server 負載（等於執行緒數的一半，也是 PipeANN 的公平執行點），
-$C=32$ 則讓並發度追平執行緒數（$C=T$），使每個 worker 都有查詢在跑、每 hop 各發 $W$ 個讀取，SSD 端的有效佇列深度 $D_\text{eff}=C\times W$ 遠超 knee，排隊行為主導延遲。
-其中 $C=16$ 是主要的 QPS 比較點，因為此時四個系統都落在有意義且公平的工作區間。
-
-搜尋長度 $L$ 是控制 recall 的主要旋鈕：$L$ 越大 recall 越高，但每筆查詢的 hop 數與 I/O 也越多。
-藉由掃描 $L \in \{20, 30, 50, 80, 100, 150, 200, 250, 300\}$，可在 recall 軸上畫出 QPS--recall 的 Pareto 曲線，涵蓋 recall 約 0.60 到 0.99 的區間；此種以 recall--QPS Pareto 曲線在等召回率下比較不同系統的方法，沿用自 ANN 標準評測實務\cite{aumuller2020annbench}。
+The search-list length $L$ is swept across $\{20, 30, 50, 80, 100, 150, 200, 250, 300\}$ to produce recall--performance Pareto curves.
+Systems are compared at comparable recall, following standard ANN benchmarking practice\cite{aumuller2020annbench}.
 
 %-------------------------------------------------------------
-\section{量測指標定義}
+\section{Metric Definitions}
 \label{sec:metrics}
 %-------------------------------------------------------------
 
 \begin{description}
   \item[Recall@10]
-    $|S_{10}(q) \cap G_{10}(q)| \;/\; 10$，
-    其中 $S_{10}(q)$ 為系統返回的 top-10，$G_{10}(q)$ 為 ground truth top-10。
-    以 10,000 筆 query 的算術平均值報告。
+    The fraction of returned top-10 results that appear in the ground-truth top-10 set, averaged over 10,000 queries.
 
-  \item[QPS（Queries Per Second）]
-    $n_\text{total} / T_\text{wall}$，
-    以 client 端牆鐘時間計算，
-    包含 TCP 傳輸延遲（通常 $< 0.1\,\text{ms}$，在 localhost 模式下可忽略）。
+  \item[QPS]
+    Queries per second, measured by the client from the first query sent to the last response received.
 
-  \item[Server-side Latency（Mean / P50 / P99 / P999）]
-    以 server 端的處理時間計算（不含 TCP 傳輸）。
-    P99 與 P999 是評估尾延遲行為的主要指標，
-    對應 SLA 中「99\% / 99.9\% 請求須在時限內完成」的要求。
+  \item[Server-side latency]
+    Mean, P50, P99, and P999 processing time measured inside the server. P99 and P999 are used to characterize tail latency.
 
   \item[MeanIOs]
-    每次查詢觸發的 SSD 讀取次數的平均值（不含快取命中）。
-    四個受測系統皆回報此數字，用於解釋各系統 QPS 差異的來源；
-    在 \S\ref{sec:eval-ablation} 的消融實驗中，此指標特別用於量化 CA-ET 的 I/O 節省效果。
+    The average number of SSD reads issued per query, excluding cache hits.
 
-  \item[RSS（Resident Set Size）]
-    Server process 在量測期間達到的峰值常駐記憶體大小，
-    以 \texttt{/proc/\$PID/status} 的 \texttt{VmHWM}（high-water mark）欄位讀取，
-    而非當下瞬時值 \texttt{VmRSS}，以避免因記憶體釋放而低估實際峰值用量。
-    用於驗證實際記憶體用量是否在預算內。
+  \item[RSS]
+    Peak resident memory measured from \texttt{/proc/\$PID/status} using \texttt{VmHWM}.
 \end{description}
 
 %-------------------------------------------------------------
-\section{iso-recall 下的系統比較}
+\section{System Comparison at Iso-Recall}
 \label{sec:eval-compare}
 %-------------------------------------------------------------
 
-第一組實驗在均勻（i.i.d.）查詢下，比較四個系統在相同 8\,GB 記憶體預算下的效能。
-各系統各自掃描搜尋長度 $L$，得到召回率對 QPS、平均延遲、尾延遲與 I/O 的完整 Pareto 曲線。
-PaceANN 在此採用 OPQ 壓縮（32\,bytes/vector）與 beam width 8 的配置，並同時啟用動態快取與早停。
+Figures~\ref{fig:pareto-throughput} to~\ref{fig:pareto-io} compare DiskANN, Starling, PipeANN, and PaceANN at $C=16$ with an 8\,GB budget.
+PaceANN uses OPQ at 32\,bytes/vector, beam width 8, PAC, and CA-ET.
 
-圖~\ref{fig:pareto-throughput}~至圖~\ref{fig:pareto-io}~分別呈現三個 100M 級資料集（SPACEV100M／SIFT100M／DEEP100M，由左至右）
-在 $C=16$ 下的四項指標對 Recall@10 的關係。PaceANN（藍色菱形）在 SPACEV100M 上對 DiskANN、Starling、PipeANN 三者全程領先；
-在 DEEP100M 與 SIFT100M 上則穩定領先 DiskANN 與 Starling，但相對 PipeANN 的優勢並不一致——僅在最低召回率（$L=60$）的點上領先，
-$L$ 提高後 PipeANN（使用其自身最強的 \texttt{pipe\_search} 機制、於其公平並發點量測）反而反超，且差距隨召回率上升而擴大
-（DEEP100M 在 $L=200$ 時 PipeANN QPS 領先 PaceANN 達 24\%）。這代表 PaceANN 相對 DiskANN／Starling 的領先具有一致性，
-但相對 PipeANN 則是資料集相依、甚至領先方向會反轉的結果，本論文選擇誠實呈現而非只挑選有利的資料集比較。
-Starling 的靜態 block-shuffling 佈局讓它在低召回率時 I/O 效率最好，但曲線斜率較陡，高召回率時反而落後於 PaceANN 與 DiskANN。
+On SPACEV100M, PaceANN leads all three baselines across the measured recall range.
+On SIFT100M and DEEP100M, PaceANN consistently outperforms DiskANN and Starling, but PipeANN becomes stronger in the medium- and high-recall regions.
+This shows that PaceANN's advantage is robust against DiskANN and Starling, but not universal against PipeANN.
+Starling performs well at low recall because its page layout improves I/O density, but its advantage weakens as recall increases.
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{img/fig_pareto_throughput.pdf}
-  \caption{iso-recall 下四系統的吞吐量比較（SPACEV100M／SIFT100M／DEEP100M，i.i.d.，$C=16$，8\,GB 預算）。
-  PaceANN 對 DiskANN／Starling 在三個資料集上皆全域領先；對 PipeANN 則僅 SPACEV100M 全域領先，SIFT100M／DEEP100M 上 PipeANN 在中高召回率區段反超。}
+  \caption[Throughput comparison at iso-recall]{Throughput comparison at iso-recall for the four systems on SPACEV100M, SIFT100M, and DEEP100M under i.i.d. queries with $C=16$ and an 8\,GB budget. PaceANN leads DiskANN and Starling on all three datasets. Against PipeANN, PaceANN leads across the full range only on SPACEV100M; on SIFT100M and DEEP100M, PipeANN overtakes it in the medium- and high-recall regions.}
   \label{fig:pareto-throughput}
 \end{figure}
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{img/fig_pareto_mean_latency.pdf}
-  \caption{iso-recall 下四系統的平均延遲比較（同圖~\ref{fig:pareto-throughput}~設定）。趨勢與吞吐量互為倒數：PaceANN 對 DiskANN／Starling 的延遲增幅在高召回率區段明顯較平緩，但對 PipeANN（SIFT100M／DEEP100M）則沒有這個優勢，與圖~\ref{fig:pareto-throughput}~呈現相同的交叉模式。}
+  \caption[Mean-latency comparison at iso-recall]{Mean-latency comparison at iso-recall under the same setting as Figure~\ref{fig:pareto-throughput}. The trend mirrors throughput: PaceANN's latency grows more slowly than DiskANN and Starling at high recall, but it does not keep this advantage over PipeANN on SIFT100M and DEEP100M.}
   \label{fig:pareto-mean-latency}
 \end{figure}
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{img/fig_pareto_tail_latency.pdf}
-  \caption{iso-recall 下四系統的 P99 尾延遲比較（同圖~\ref{fig:pareto-throughput}~設定）。PipeANN 在 SPACEV100M 低召回率點出現的尖峰反映單次量測雜訊（見 \S\ref{sec:eval-compare} 高並發討論），非系統性趨勢；SIFT100M／DEEP100M 上 PipeANN 在中高召回率區段的尾延遲反而低於 PaceANN，與圖~\ref{fig:pareto-throughput}~的交叉模式一致。}
+  \caption[P99 tail-latency comparison at iso-recall]{P99 tail-latency comparison at iso-recall under the same setting as Figure~\ref{fig:pareto-throughput}. The low-recall spike of PipeANN on SPACEV100M reflects one-run measurement noise rather than a systematic trend. On SIFT100M and DEEP100M, PipeANN has lower tail latency than PaceANN in the medium- and high-recall regions, matching the crossover pattern in throughput.}
   \label{fig:pareto-tail-latency}
 \end{figure}
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{img/fig_pareto_io.pdf}
-  \caption{iso-recall 下四系統的平均 SSD I/O 讀取次數比較（同圖~\ref{fig:pareto-throughput}~設定）。CA-ET 與動態快取共同作用，讓 PaceANN 在中高召回率區段的 I/O 成長速率明顯低於其餘系統。}
+  \caption[Average SSD-read count at iso-recall]{Average SSD-read count at iso-recall under the same setting as Figure~\ref{fig:pareto-throughput}. CA-ET and dynamic caching together make PaceANN's I/O grow more slowly than the other systems in the medium- and high-recall regions.}
   \label{fig:pareto-io}
 \end{figure}
 
-PipeANN 的公平並發點為 $C=16$（見下段討論），以上四張圖即在該並發點下量測，並使用其論文的headline機制 \texttt{pipe\_search}（$\text{mode}=2$，io\_uring 管線化 I/O 與運算重疊搜尋）而非其自身消融用的 \texttt{beam\_search}（$\text{mode}=0$）。
-Starling 的 navigation graph seed 深度採用其驗證過的設定 $L_\text{mem}=100$。
-
-在高並發下，我們另外比較各系統的 QPS 與尾延遲。PipeANN 的 \texttt{pipe\_search} 用 io\_uring 的 SQPOLL 與非阻塞完成輪詢
-（busy-spin，持續呼叫 \texttt{io\_uring\_peek\_batch\_cqe} 而非阻塞等待），這代表每個搜尋執行緒與其對應的 SQPOLL kernel thread
-各自需要獨佔一顆實體核心空轉，跟 DiskANN／Starling／PaceANN 的阻塞式 I/O（可安全超額訂閱到多個執行緒共用少數核心）本質不同。
-在實驗機的 32 執行緒上，其公平執行點為 $C=16$（16 個搜尋執行緒加 16 個 SQPOLL 執行緒恰好用滿 32 核，無超額訂閱）；
-一旦 client 端並發推到 $C=32$，等同讓這套 busy-spin 機制在同一批核心上 2 倍超額訂閱，觸發其設計上未涵蓋的病態尾延遲，
-而非單純的吞吐量飽和。故 PipeANN 的主要比較數字以其公平點 $C=16$ 呈現，其餘系統則跑到 $C=32$（見 \S\ref{sec:eval-discuss} 的公平性討論）。
-以 $\approx 0.98$ recall（$L=200$）為例：$C=32$ 下 DiskANN QPS $2939.2$（P99 $13.49$\,ms）、
-Starling QPS $3257.6$（P99 $15.84$\,ms）、PaceANN QPS $4820.9$（P99 $12.36$\,ms）；
-PipeANN 在其公平點 $C=16$ 為 QPS $2695.4$（P99 $8.12$\,ms）。
-若仍將 PipeANN 推到 $C=32$，QPS 幾乎不再成長（實測 $2713.9$，僅 $+0.7\%$），代表其架構在 $C=16$ 已達其吞吐上限，
-超額訂閱後多餘的並發請求無法轉換為更多吞吐量。尾延遲方面，$L=160$ 時 P99 從 $C=16$ 的 $7.29$\,ms 上升到 $C=32$ 的 $12.46$\,ms（$1.71\times$），
-略高於其餘三個阻塞式 I/O 系統同區間的漲幅（DiskANN $1.40\times$、PaceANN $1.38\times$、Starling $1.56\times$），
-但並非早期以 \texttt{pipeline\_width}$=4$ 量測時觀察到的數倍暴衝——校準為官方建議的 \texttt{pipeline\_width}$=32$ 後，
-這個相對更高的漲幅仍與其 SQPOLL 執行緒在超額訂閱下需與其他執行緒競爭實體核心的架構解釋一致，只是幅度較為溫和。
+At recall $\approx 0.98$ on SPACEV100M, PaceANN reaches QPS $4820.9$ at $C=32$, compared with DiskANN's $2939.2$ and Starling's $3257.6$.
+Its P99 latency is $12.36$\,ms, compared with $13.49$\,ms for DiskANN and $15.84$\,ms for Starling.
+PipeANN reaches QPS $2695.4$ and P99 $8.12$\,ms at its fair point $C=16$.
 
 %-------------------------------------------------------------
-\section{兩機制的消融}
+\section{Ablation of the Two Mechanisms}
 \label{sec:eval-ablation}
 %-------------------------------------------------------------
 
-為分別量化動態快取與早停的貢獻，我們在同一組 index 與記憶體預算下，
-依序開關兩個機制，採漸進式啟用策略，設定組合如表~\ref{tab:ablation} 所列，觀察 iso-recall 下的 QPS 與尾延遲變化。
+Table~\ref{tab:ablation} lists the ablation configurations, and Table~\ref{tab:eval-ablation} reports their performance on SPACEV100M.
 
 \begin{table}[h]
 \centering
-\caption{消融研究的系統設定組合}
+\caption[Ablation configurations]{Configurations used in the ablation study}
 \label{tab:ablation}
 \begin{tabular}{lll}
 \toprule
-設定代號 & 動態快取（PAC） & CA-ET \\
+Configuration & Dynamic cache (PAC) & CA-ET \\
 \midrule
 \texttt{baseline}    & \texttimes & \texttimes \\
 \texttt{cache\_only} & \checkmark & \texttimes \\
@@ -246,13 +184,13 @@ PipeANN 在其公平點 $C=16$ 為 QPS $2695.4$（P99 $8.12$\,ms）。
 
 \begin{table}[h]
 \centering
-\caption{兩機制消融（SPACEV100M，i.i.d.，8\,GB 預算，$L=200$，recall@10 $\approx 0.980$）}
+\caption[Ablation of PAC and CA-ET]{Ablation of the two mechanisms on SPACEV100M under i.i.d. queries with an 8\,GB budget, $L=200$, and recall@10 $\approx 0.980$}
 \label{tab:eval-ablation}
 \begin{tabular}{lccc}
 \toprule
-設定 & QPS ($C=16$) & QPS ($C=32$) & 平均 I/O \\
+Configuration & QPS ($C=16$) & QPS ($C=32$) & Mean I/O \\
 \midrule
-baseline（無快取無 CA-ET） & 2052.5 & 2939.2 & 210.26 \\
+baseline (no cache, no CA-ET) & 2052.5 & 2939.2 & 210.26 \\
 cache\_only            & 2250.1 & 3296.4 & 177.08 \\
 ET\_only               & 3056.8 & 4432.8 & 136.54 \\
 full                   & 3265.1 & 4820.9 & 120.06 \\
@@ -260,30 +198,26 @@ full                   & 3265.1 & 4820.9 & 120.06 \\
 \end{tabular}
 \end{table}
 
-其中 \texttt{full} 對 \texttt{cache\_only} 的差距，是在相同 OPQ、beam width 與快取預算下\emph{只切換早停開關}所得，
-因此可視為早停這一機制的乾淨貢獻：實測 QPS 提升 $C=16$ 時 $+45.1\%$、$C=32$ 時 $+46.3\%$，隨並發度上升而略微放大，
-支持「早停省下的 I/O 在高並發時把頻寬讓回給佇列、進而放大吞吐量」的論點。
-四組比較的完整圖像是：\texttt{cache\_only} 相對 baseline 有 $+9.6\%$（$C=16$）到 $+12.2\%$（$C=32$）的溫和提升，
-單靠動態快取重疊收斂熱區的效果有限；\texttt{ET\_only} 相對 baseline 則有 $+48.9\%$（$C=16$）到 $+50.8\%$（$C=32$）的大幅提升，
-顯示消除收斂後冗餘 hop 是本實驗設定下更主要的增益來源；而 \texttt{full} 對 \texttt{ET\_only} 僅再貢獻 $+6.8\%$（$C=16$）到 $+8.8\%$（$C=32$），
-代表快取對早停可靠性的「使能效應」存在但幅度不大——與平均 I/O 的變化趨勢一致（210.26 $\to$ 177.08 $\to$ 136.54 $\to$ 120.06）。
-此一使能效應正是 \S\ref{sec:codesign} 協同必要性論點的直接實驗驗證。
+The ablation shows that CA-ET is the larger contributor in this setting.
+\texttt{ET\_only} improves QPS over the baseline by $+48.9\%$ at $C=16$ and $+50.8\%$ at $C=32$.
+\texttt{cache\_only} provides a smaller improvement, from $+9.6\%$ to $+12.2\%$.
+The full configuration achieves the best result and reduces MeanIOs from 210.26 to 120.06, confirming that the two mechanisms reduce SSD traffic together.
 
 %-------------------------------------------------------------
-\section{$\theta$ 參數敏感性}
+\section{Sensitivity to $\theta$}
 \label{sec:eval-theta}
 %-------------------------------------------------------------
 
-早停的鬆緊由門檻 $\theta$ 控制。$\theta$ 越小越積極、省下的 hop 越多，但假陽性終止造成的召回率損失也越大。
-我們在固定資料集與快取配置下掃描 $\theta$，觀察其對召回率與 QPS 的取捨，並確認最優區間的穩定性。
+The CA-ET threshold $\theta$ controls the tradeoff between saved I/O and recall.
+Smaller values stop earlier; larger values are more conservative.
 
 \begin{table}[h]
 \centering
-\caption{$\theta$ 對召回率與 QPS 的影響（SPACEV100M，$L=200$，$C=16$）}
+\caption[Effect of theta on recall and QPS]{Effect of $\theta$ on recall and QPS on SPACEV100M with $L=200$ and $C=16$}
 \label{tab:eval-theta}
 \begin{tabular}{lccc}
 \toprule
-$\theta$ & Recall@10 & QPS & 平均 I/O \\
+$\theta$ & Recall@10 & QPS & Mean I/O \\
 \midrule
 1.0 & 0.8965 & 9045.3 & 39.78 \\
 1.1 & 0.9543 & 6931.0 & 53.96 \\
@@ -295,15 +229,8 @@ $\theta$ & Recall@10 & QPS & 平均 I/O \\
 \end{tabular}
 \end{table}
 
-曲線在 $\theta \in [1.0, 1.2]$ 呈現清楚的單調取捨：$\theta$ 越小、早停越積極，QPS 越高但 recall 損失也越大
-（$\theta=1.0$ 時 recall 掉到 $0.897$，明顯過於激進）。但 $\theta \ge 1.3$ 之後 recall 已趨近飽和（$0.980$--$0.981$，
-與無早停的 baseline recall $0.9809$ 幾乎相同），此區間內 QPS 的微幅波動（例如 $\theta=1.3$ 比 $\theta=1.4$ 低）
-更可能是 server-mode 量測雜訊而非真實趨勢——$\theta=1.3$ 這個點的 P99/P999 出現異常尖峰（$27.0$/$32.4$\,ms，
-遠高於相鄰的 $\theta=1.2$ 與 $1.4$），支持雜訊解釋。以平均 I/O 而非 QPS 判斷則單調性完全成立（$39.78 \to 163.88$
-隨 $\theta$ 遞增而遞增），因此本研究以平均 I/O 作為判斷早停積極程度的主要依據。
-本文選用的 $\theta=1.3$ 落在「recall 已飽和、I/O 尚未過度保守」的甜蜜點區間。
-
-$\theta$ 的最優點與資料集的 PQ 量化誤差分布有關，不同維度與 segment 數的 PQ 設定下略有差異，
-因此本文將 $\theta$ 視為需依資料集校準的參數，而非固定常數；本研究在 SIFT1B（十億級規模）上的驗證即發現
-同一 $\theta$ 值（沿用自 SIFT100M 的 $1.4$）明顯過於保守，需重新掃描後校準為 $\theta=1.25$ 才能取得有意義的 I/O 節省，
-說明 $\theta$ 不只跨資料集需要校準，跨資料規模也是如此。
+The results show the expected tradeoff.
+Very small $\theta$ values produce high QPS but lose recall.
+For $\theta \ge 1.3$, recall is close to the no-early-termination baseline, while Mean I/O remains substantially below the baseline.
+This thesis uses $\theta=1.3$ because it lies near the point where recall has saturated but early termination still saves I/O.
+In practice, $\theta$ should be calibrated for each dataset because PQ quantization error affects the reliability of the stopping signal.

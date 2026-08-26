@@ -1,40 +1,31 @@
 \chapter{Introduction}
 \label{ch:intro}
 
-近年來，支撐檢索、推薦、語意搜尋與多模態理解的向量資料庫規模快速擴張，
-使得 Approximate Nearest Neighbor Search（ANNS）成為大規模系統中的核心操作之一。
-在億級以上的資料集上，若仍以精確最近鄰搜尋處理每一筆查詢，計算成本與延遲都會迅速失控，
-因此研究社群逐步轉向局部敏感雜湊\cite{datar2004lsh}、圖式索引\cite{malkov2020hnsw,fu2019nsg}與量化近似\cite{jegou2011pq}等方法，以在 recall 與 throughput 之間取得平衡\cite{subramanya2019diskann,chen2021spann}.
+Approximate nearest neighbor search (ANNS) is a key operation in modern vector databases, retrieval systems, recommendation engines, and semantic search services.
+At hundred-million scale and beyond, exact nearest neighbor search is usually too slow, so practical systems rely on approximate indexes such as locality-sensitive hashing\cite{datar2004lsh}, graph-based indexes\cite{malkov2020hnsw,fu2019nsg}, and quantization-based methods\cite{jegou2011pq}.
+Among these approaches, graph-based ANNS provides a strong balance between recall and throughput\cite{subramanya2019diskann,chen2021spann}.
 
-DiskANN 是其中最具代表性的磁碟式 graph-based ANNS 系統之一，並已被整合進實際的向量資料庫與雲端服務\cite{wang2021milvus,upreti2025cosmos}。
-它以 Vamana 圖為核心，透過 PQ 壓縮與 beam search 在單節點上支援百萬到十億級規模的查詢，
-在記憶體使用量上相對節制，但查詢過程仍需要大量隨機磁碟 I/O。
-尤其當企業將 RAG 等 agent 服務部署於地端、由多個使用者併發觸發檢索時，資料集規模與並發查詢同時上升，這些隨機讀取便成為主要瓶頸，導致系統難以同時維持高 recall、低延遲與高吞吐量\cite{subramanya2019diskann}.
+DiskANN is a representative disk-based graph ANNS system and has been adopted in practical vector databases and cloud services\cite{wang2021milvus,upreti2025cosmos}.
+It combines the Vamana graph, product quantization (PQ), and beam search to support large indexes on a single machine while keeping memory usage manageable.
+However, its search path still performs many random SSD reads.
+Under concurrent serving, where many users issue retrieval requests at the same time, these reads accumulate in the shared SSD queue and become a major source of throughput loss and tail latency\cite{subramanya2019diskann}.
 
-Starling 則嘗試從 page layout 的角度改善這個問題。
-它透過 block shuffling 與 in-memory navigation graph 提高每次 page read 的資訊密度，
-降低無效 I/O 的比例，因而在靜態索引與中等 recall 設定下能取得顯著加速\cite{wang2024starling}.
-然而，Starling 的優勢高度依賴資料布局與導覽圖品質；一旦面對 streaming update、
-記憶體預算下降或高併發 CPU 飽和等場景，其效益並不一定能維持。
+Prior work has improved disk-based ANNS from different directions.
+For example, Starling improves page layout through block shuffling and an in-memory navigation graph, increasing the amount of useful information returned by each page read\cite{wang2024starling}.
+This approach is effective under static-index settings, but its benefit depends on the offline layout and navigation-graph quality.
+When memory budgets shrink, query distributions shift, or updates arrive over time, a fixed layout alone may not fully address the serving bottleneck.
 
-本研究提出 PaceANN，核心目標是讓 DiskANN 在不重建索引布局的前提下，
-以更低的磁碟讀取數和更早的無效展開停止條件，改善實務查詢效率。
-PaceANN 的設計重點有兩個機制。
-第一，它在原本的 DiskANN 搜尋路徑上加入一層\textbf{熱門度自適應快取管理器}（Popularity-Adaptive Cache Manager, PAC）：
-以分片式 CLOCK 結構在查詢期間依實際存取熱點演化，並在快取項目中與鄰居列表共存全精度向量；
-快取未命中時直接退回原本的磁碟讀取路徑，搜尋語義不變。
-第二，它在 beam search 中加入 per-query 的\textbf{收斂感知早停}（Convergence-Aware Early Termination, CA-ET），
-以已收斂候選的精確距離判斷是否可停，使 easy query 更早停下、hard query 繼續展開，
-避免所有查詢都被同一個固定預算綁住\cite{li2020adaptiveet,chatzakis2025darth,teofili2025patience}.
+This thesis proposes PaceANN, an acceleration layer for DiskANN that preserves the existing index layout.
+PaceANN focuses on reducing unnecessary SSD I/O during search through two mechanisms.
+First, the \textbf{Popularity-Adaptive Cache Manager} (PAC) dynamically caches frequently visited nodes using a sharded CLOCK design.
+Each cache entry stores both the neighbor list and the full-precision vector, reducing I/O during traversal and re-ranking.
+Second, \textbf{Convergence-Aware Early Termination} (CA-ET) adds a per-query stopping rule to beam search.
+It uses already observed exact-distance candidates to decide whether the current query has converged, allowing easy queries to stop early while difficult queries continue searching\cite{li2020adaptiveet,chatzakis2025darth,teofili2025patience}.
 
-本論文的主要貢獻如下：
+The main contributions of this thesis are as follows:
 \begin{itemize}
-  \item 提出熱門度自適應快取管理器（PAC）：分片 CLOCK 加座標共存，在高並發下以低鎖競爭將熱點鄰居維持於 DRAM，並消除 re-rank 的 SSD I/O。
-  \item 設計 per-query 的收斂感知早停（CA-ET）：以跨尺度門檻（記憶體 PQ 估距對比第 $2k$ 名的精確距離）加 patience 計數，讓查詢依收斂狀態提前停止，且不額外觸發任何 I/O。
-  \item 論證 PAC 與 CA-ET 的協同必要性，並在並發服務、iso-recall 與等記憶體預算下完成評估：
-    PaceANN 在 SPACEV100M／SIFT100M／DEEP100M 三個 100M 級資料集上全面超越 DiskANN baseline（QPS 最高提升 59\%）與 Starling；
-    相較於使用其自身最強機制（\texttt{pipe\_search}）且運行於公平並發點的 PipeANN，結果則因資料集而異——
-    SPACEV100M 上 PaceANN 明顯領先，但 SIFT100M／DEEP100M 上 PipeANN 在高 recall 端反而略勝一籌，
-    顯示 PaceANN 相對 PipeANN 的優勢並非普遍成立。PaceANN 同時在 SIFT1B 十億級規模上重現對 DiskANN 的領先（QPS 最高提升 46\%）。
-  \item 分析記憶體與並發下的行為，說明兩個機制的協同效果，以及高並發下 shard contention 的界限。
+  \item We design PAC, a sharded CLOCK-based cache that adapts to serving-time access patterns and co-stores neighbor lists with full-precision vectors to reduce both traversal and re-ranking I/O.
+  \item We introduce CA-ET, a per-query early-termination rule that detects convergence without issuing additional SSD reads.
+  \item We show that PAC and CA-ET are complementary: caching stabilizes early search and supplies exact vectors, while early termination removes post-convergence expansions that caching alone cannot eliminate.
+  \item We evaluate PaceANN under concurrent serving and equal memory budgets. On SPACEV100M, SIFT100M, and DEEP100M, PaceANN consistently outperforms DiskANN and Starling at the 100M scale, with QPS improvements of up to 59\%. Compared with PipeANN, the result is dataset-dependent: PaceANN leads on SPACEV100M, while PipeANN is stronger in the high-recall region on SIFT100M and DEEP100M.
 \end{itemize}
