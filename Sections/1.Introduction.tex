@@ -30,7 +30,7 @@ PaceANN 的設計重點有兩個機制。
 本論文的主要貢獻如下：
 \begin{itemize}
   \item 提出熱門度自適應快取管理器（PAC）：分片 CLOCK 加座標共存，在高並發下以低鎖競爭將熱點鄰居維持於 DRAM，並消除 re-rank 的 SSD I/O。
-  \item 設計 per-query 的收斂感知早停（CA-ET）：以跨尺度精確門檻（PQ 下界對比第 $2k$ 名的精確距離）加 patience 計數，讓查詢依收斂狀態提前停止，且不額外觸發任何 I/O。
+  \item 設計 per-query 的收斂感知早停（CA-ET）：以跨尺度門檻（記憶體 PQ 估距對比第 $2k$ 名的精確距離）加 patience 計數，讓查詢依收斂狀態提前停止，且不額外觸發任何 I/O。
   \item 論證 PAC 與 CA-ET 的協同必要性，並在並發服務、iso-recall 與等記憶體預算下完成評估。% TODO(定稿數字)：填入去污染後對 DiskANN／Starling／PipeANN 的具體結果
   \item 分析記憶體與並發下的行為，說明兩個機制的協同效果，以及高並發下 shard contention 的界限。
 \end{itemize}
